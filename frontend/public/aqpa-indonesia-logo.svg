@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 160" role="img" aria-label="AQPA Indonesia">
+  <rect width="760" height="160" fill="#ffffff"/>
+  <circle cx="78" cy="80" r="62" fill="#ffffff" stroke="#1684ff" stroke-width="4"/>
+  <path d="M69 30h40l27 100H95l-5-23H62l-5 23H17L45 30h15l20 74h4L69 30z" fill="#1684ff"/>
+  <path d="M45 42l20 78H52L33 42z" fill="#ffffff" opacity=".95"/>
+  <text x="170" y="98" font-family="Arial, Helvetica, sans-serif" font-size="62" font-weight="800" fill="#1b1b1f">AQPA</text>
+  <text x="355" y="98" font-family="Arial, Helvetica, sans-serif" font-size="60" font-weight="400" fill="#1b1b1f">INDONESIA</text>
+</svg>
