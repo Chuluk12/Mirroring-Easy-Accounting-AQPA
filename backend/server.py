@@ -71,7 +71,8 @@ DB_CONFIG = {
     "port": int(os.getenv("EASY_DB_PORT", "3999")),
     "database": os.getenv("EASY_DB_PATH", "E:/EASY/AQPA.EASY6"),
     "user": os.getenv("EASY_DB_USER", "SYSDBA"),
-    "password": os.getenv("EASY_DB_PASSWORD", "NewPassword123")
+    "password": os.getenv("EASY_DB_PASSWORD", "NewPassword123"),
+    "charset": "WIN1252"
 }
 
 # DB_CONFIG = {
