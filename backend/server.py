@@ -31,7 +31,10 @@ app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=8)
 jwt = JWTManager(app)
 socketio = SocketIO(app, cors_allowed_origins="*", max_http_buffer_size=50*1024*1024)
 
-fdb.load_api("C:/Program Files/Firebird/Firebird_3_0/fbclient.dll")
+if os.name == 'nt':
+    fdb.load_api("C:/Program Files/Firebird/Firebird_3_0/fbclient.dll")
+else:
+    fdb.load_api("libfbclient.so.2")
 
 def load_env_file(path):
     if not path.exists():
