@@ -34,7 +34,23 @@ socketio = SocketIO(app, cors_allowed_origins="*", max_http_buffer_size=50*1024*
 if os.name == 'nt':
     fdb.load_api("C:/Program Files/Firebird/Firebird_3_0/fbclient.dll")
 else:
-    fdb.load_api("libfbclient.so.2")
+    # Try different possible locations for Linux
+    possible_paths = [
+        "libfbclient.so.2",
+        "libfbclient.so",
+        "/usr/lib/x86_64-linux-gnu/libfbclient.so.2",
+        "/usr/lib/x86_64-linux-gnu/libfbclient.so"
+    ]
+    loaded = False
+    for path in possible_paths:
+        try:
+            fdb.load_api(path)
+            loaded = True
+            break
+        except Exception:
+            continue
+    if not loaded:
+        raise Exception("Firebird Client Library not found. Please install libfbclient2.")
 
 def load_env_file(path):
     if not path.exists():
