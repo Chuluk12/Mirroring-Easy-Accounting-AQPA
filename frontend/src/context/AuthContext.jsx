@@ -6,6 +6,7 @@ const AuthContext = createContext(null)
 const PERMISSION_PARENTS = {
   salesman: 'penjualan',
   customer: 'penjualan',
+  waktu_pengiriman: 'penjualan_do',
 }
 
 export function AuthProvider({ children }) {

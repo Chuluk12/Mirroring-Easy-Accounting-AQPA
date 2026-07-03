@@ -52,6 +52,7 @@ const ROLE_COLOR = {
   purchasing: 'orange',
   marketing: 'green',
   akuntansi: 'gold',
+  akutansi_staff: 'gold',
   produksi: 'purple',
   ppc: 'geekblue',
 }
@@ -171,9 +172,12 @@ export default function Users() {
   const handleSaveRole = async (values) => {
     setSavingRole(true)
     try {
-      const modules = Array.from(new Set([...(values.modules || []), 'dashboard']))
+      const roleName = editingRole || values.role
+      const modules = roleName === 'akutansi_staff'
+        ? ['akuntansi', 'project']
+        : Array.from(new Set([...(values.modules || []), 'dashboard']))
       const res = await api.post('/api/roles', {
-        role: editingRole || values.role,
+        role: roleName,
         modules,
         column_permissions: values.column_permissions || {},
       })
@@ -571,7 +575,7 @@ export default function Users() {
           </Form.Item>
 
           <Text type="secondary" style={{ display: 'block', marginBottom: 16, fontSize: 12 }}>
-            Dashboard otomatis aktif untuk setiap role. Role admin tetap dianggap akses penuh oleh sistem.
+            Dashboard otomatis aktif untuk setiap role, kecuali Akutansi Staff. Role admin tetap dianggap akses penuh oleh sistem.
           </Text>
 
           <Form.Item style={{ marginBottom: 0, textAlign: 'right' }}>

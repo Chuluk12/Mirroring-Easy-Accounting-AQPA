@@ -26,7 +26,10 @@ const manualAccounts = new Set([
 ])
 const revenueAccount = '4.00.00.001'
 const hppAccount = '5.00.00.001'
-const isNegativeProfitLoss = row => row?.is_total && row?.nama_akun === 'Profit & Loss' && Number(row?.realisasi || 0) < 0
+const getSummaryValueColor = (row, value) => {
+  if (!row?.is_total && !row?.is_percentage) return undefined
+  return Number(value || 0) < 0 ? '#d41452' : '#111827'
+}
 const getOverdueDays = value => {
   if (!value) return null
   const diff = dayjs().startOf('day').diff(dayjs(value).startOf('day'), 'day')
@@ -72,6 +75,8 @@ export default function LaporanProject() {
   const [transactionRows, setTransactionRows] = useState([])
   const [transactionTotal, setTransactionTotal] = useState(0)
   const [transactionSummary, setTransactionSummary] = useState({})
+  const [feeModalOpen, setFeeModalOpen] = useState(false)
+  const [feeRecord, setFeeRecord] = useState(null)
   const [header, setHeader] = useState({})
   const [rows, setRows] = useState([])
   const [manualForm] = Form.useForm()
@@ -250,6 +255,11 @@ export default function LaporanProject() {
     }
   }
 
+  const openFeeModal = record => {
+    setFeeRecord(record)
+    setFeeModalOpen(true)
+  }
+
   const handleSaveNote = async () => {
     try {
       const values = await noteForm.validateFields()
@@ -283,16 +293,17 @@ export default function LaporanProject() {
       width: 320,
       render: (value, record) => {
         const hasTransactionValue = Number(record.realisasi || 0) > 0 && !record.is_manual
+        const canOpenFeeDetails = record.realization_source === 'profit_loss' && Array.isArray(record.fee_details) && record.fee_details.length > 0
         const canOpenRevenueItems = header.project_type === 'mkt' && record.no_akun === revenueAccount && !record.is_total && !record.is_percentage && hasTransactionValue
         const canOpenHppItems = header.project_type === 'mkt' && record.no_akun === hppAccount && !record.is_total && !record.is_percentage
-        const canOpenTransactions = !record.is_total && !record.is_percentage && (hasTransactionValue || canOpenHppItems)
+        const canOpenTransactions = !record.is_total && !record.is_percentage && (canOpenFeeDetails || hasTransactionValue || canOpenHppItems)
         if (!canOpenTransactions) return value
         return (
           <Button
             type="link"
             className="project-report-account-link"
-            icon={canOpenRevenueItems || canOpenHppItems ? <UnorderedListOutlined /> : <FileSearchOutlined />}
-            onClick={canOpenRevenueItems ? openRevenueItemsModal : canOpenHppItems ? openHppItemsModal : () => openTransactionModal(record)}
+            icon={canOpenRevenueItems || canOpenHppItems || canOpenFeeDetails ? <UnorderedListOutlined /> : <FileSearchOutlined />}
+            onClick={canOpenFeeDetails ? () => openFeeModal(record) : canOpenRevenueItems ? openRevenueItemsModal : canOpenHppItems ? openHppItemsModal : () => openTransactionModal(record)}
           >
             {value}
           </Button>
@@ -305,8 +316,11 @@ export default function LaporanProject() {
       width: 160,
       align: 'right',
       render: (value, record) => {
-        if (record.is_percentage) return record.show_rab_percentage === false ? '-' : formatPct(value)
-        return <span style={{ color: isNegativeProfitLoss(record) ? '#d41452' : undefined }}>{formatRp(value)}</span>
+        if (record.is_percentage) {
+          if (record.show_rab_percentage === false) return '-'
+          return <span style={{ color: getSummaryValueColor(record, value) }}>{formatPct(value)}</span>
+        }
+        return <span style={{ color: getSummaryValueColor(record, value) }}>{formatRp(value)}</span>
       },
     },
     {
@@ -315,12 +329,20 @@ export default function LaporanProject() {
       width: 160,
       align: 'right',
       render: (value, record) => {
-        if (record.is_percentage) return record.show_realisasi_percentage ? formatPct(value) : '-'
+        if (record.is_percentage) {
+          if (!record.show_realisasi_percentage) return '-'
+          return <span style={{ color: getSummaryValueColor(record, value) }}>{formatPct(value)}</span>
+        }
         const canInputManual = manualAccounts.has(record.manual_account_key || record.no_akun) && !record.has_easy_realization
         return (
           <Space size={6} style={{ justifyContent: 'flex-end', width: '100%' }}>
-            <span style={{ color: isNegativeProfitLoss(record) ? '#d41452' : undefined }}>{formatRp(value)}</span>
+            <span style={{ color: getSummaryValueColor(record, value) }}>{formatRp(value)}</span>
             {record.is_manual && <Tag color="magenta" style={{ marginInlineEnd: 0 }}>Manual</Tag>}
+            {record.realization_source === 'profit_loss' && (
+              <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+                Profit &amp; Loss
+              </Tag>
+            )}
             {canInputManual && (
               <Button
                 size="small"
@@ -381,6 +403,22 @@ export default function LaporanProject() {
     { title: 'Deskripsi', dataIndex: 'deskripsi', width: 420, render: value => value || '-' },
     { title: 'Nilai', dataIndex: 'nilai', width: 130, align: 'right', render: formatRp },
   ])
+
+  const feeColumns = withTableSorters([
+    { title: 'Tanggal', dataIndex: 'tanggal', width: 110, render: formatDateLong },
+    { title: 'No. AI', dataIndex: 'no_transaksi', width: 155, render: value => value || '-' },
+    { title: 'No. SO', dataIndex: 'source_reference', width: 140, render: value => value || '-' },
+    { title: 'Part Number', dataIndex: 'part_number', width: 160, render: value => value || '-' },
+    { title: 'Amount Asal', dataIndex: 'amount_asal', width: 140, align: 'right', render: formatRp },
+    { title: 'Persentase', dataIndex: 'persentase', width: 120, align: 'right', render: value => value || '-' },
+    { title: 'Nilai Fee', dataIndex: 'nilai_fee', width: 140, align: 'right', render: formatRp },
+  ])
+
+  const feeRows = (feeRecord?.fee_details || []).map((item, index) => ({
+    ...item,
+    source_reference: item.source_reference || item.referensi_ai_pp || item.no_so || (feeRecord?.source_references || [])[index] || '',
+  }))
+  const feeTotal = feeRows.reduce((sum, item) => sum + Number(item.nilai_fee || 0), 0)
 
   const hasReport = Boolean(header.no_project)
   const overdueDays = getOverdueDays(header.tgl_selesai)
@@ -475,12 +513,12 @@ export default function LaporanProject() {
                   >
                     <td>{row.no_akun}</td>
                     <td>{row.nama_akun}</td>
-                    <td className="project-report-print-number" style={{ color: isNegativeProfitLoss(row) ? '#d41452' : undefined }}>
+                    <td className="project-report-print-number" style={{ color: getSummaryValueColor(row, row.rab) }}>
                       {row.is_percentage
                         ? (row.show_rab_percentage === false ? '-' : formatPct(row.rab))
                         : formatRp(row.rab)}
                     </td>
-                    <td className="project-report-print-number" style={{ color: isNegativeProfitLoss(row) ? '#d41452' : undefined }}>
+                    <td className="project-report-print-number" style={{ color: getSummaryValueColor(row, row.realisasi) }}>
                       {row.is_percentage
                         ? (row.show_realisasi_percentage ? formatPct(row.realisasi) : '-')
                         : `${formatRp(row.realisasi)}${row.is_manual ? ' (Manual)' : ''}`}
@@ -647,6 +685,32 @@ export default function LaporanProject() {
             size="small"
             pagination={{ pageSize: 20, showSizeChanger: true }}
             scroll={{ x: 990, y: 430 }}
+          />
+        </Space>
+      </Modal>
+      <Modal
+        title={`Detail ${feeRecord?.nama_akun || ''} - ${header.no_project || ''}`}
+        open={feeModalOpen}
+        onCancel={() => {
+          setFeeModalOpen(false)
+          setFeeRecord(null)
+        }}
+        footer={null}
+        width={1060}
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Alert
+            showIcon
+            type="info"
+            message={`Total ${feeRows.length.toLocaleString('id-ID')} baris invoice, nilai ${formatRp(feeTotal)}.`}
+          />
+          <Table
+            rowKey={(record, index) => `${record.no_transaksi}-${record.part_number}-${record.nilai_fee}-${index}`}
+            columns={feeColumns}
+            dataSource={feeRows}
+            size="small"
+            pagination={{ pageSize: 20, showSizeChanger: true }}
+            scroll={{ x: 965, y: 430 }}
           />
         </Space>
       </Modal>

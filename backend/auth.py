@@ -1,10 +1,10 @@
-import sqlite3
+import app_db as sqlite3
 import bcrypt
 import os
 import json
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
+DB_PATH = sqlite3.DB_PATH
 
 MARKETING_MODULES = [
     "dashboard",
@@ -36,6 +36,16 @@ ACCOUNTING_ROLE_MODULES = [
     "project",
     "akuntansi",
 ]
+
+AKUTANSI_STAFF_MODULES = [
+    "akuntansi",
+    "project",
+]
+
+BARANG_BARU_EXCLUDED_PREFIXES = (
+    "CF-AI-PP",
+    "MF-AI-PP",
+)
 
 MARKETING_PEMBELIAN_COLUMNS = [
     "no_pembelian",
@@ -99,6 +109,15 @@ def sync_marketing_permissions(cur):
         "INSERT OR IGNORE INTO role_column_permissions (role, module, column_key) VALUES (?, ?, ?)",
         [("marketing", "pembelian", column_key) for column_key in MARKETING_PEMBELIAN_COLUMNS],
     )
+
+
+def sync_akutansi_staff_permissions(cur):
+    cur.execute("DELETE FROM roles WHERE role = 'akutansi_staff'")
+    cur.executemany(
+        "INSERT OR IGNORE INTO roles (role, module) VALUES (?, ?)",
+        [("akutansi_staff", module) for module in AKUTANSI_STAFF_MODULES],
+    )
+    cur.execute("DELETE FROM role_column_permissions WHERE role = 'akutansi_staff'")
 
 def ensure_audit_table(cur):
     cur.execute("""
@@ -187,6 +206,144 @@ def ensure_project_report_notes_table(cur):
         )
     """)
 
+
+def ensure_project_remarks_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS project_remarks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_no TEXT NOT NULL UNIQUE,
+            remarks TEXT NOT NULL DEFAULT '',
+            updated_by TEXT,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+
+def ensure_profit_loss_manual_cost_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS profit_loss_manual_cost (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            row_key TEXT NOT NULL UNIQUE,
+            cf REAL NOT NULL DEFAULT 0,
+            mf REAL NOT NULL DEFAULT 0,
+            project_cost REAL NOT NULL DEFAULT 0,
+            updated_by TEXT,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+
+def ensure_sales_document_checklist_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sales_document_checklist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            so_no TEXT NOT NULL,
+            document_key TEXT NOT NULL,
+            is_required INTEGER NOT NULL DEFAULT 0,
+            is_completed INTEGER NOT NULL DEFAULT 0,
+            updated_by TEXT,
+            updated_at TEXT NOT NULL,
+            validated_by TEXT,
+            validated_at TEXT,
+            document_label TEXT NOT NULL DEFAULT '',
+            department TEXT NOT NULL DEFAULT '',
+            is_custom INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(so_no, document_key)
+        )
+    """)
+    cur.execute("PRAGMA table_info(sales_document_checklist)")
+    columns = {row[1] for row in cur.fetchall()}
+    if "document_label" not in columns:
+        cur.execute("ALTER TABLE sales_document_checklist ADD COLUMN document_label TEXT NOT NULL DEFAULT ''")
+    if "department" not in columns:
+        cur.execute("ALTER TABLE sales_document_checklist ADD COLUMN department TEXT NOT NULL DEFAULT ''")
+    if "is_custom" not in columns:
+        cur.execute("ALTER TABLE sales_document_checklist ADD COLUMN is_custom INTEGER NOT NULL DEFAULT 0")
+
+
+def ensure_part_number_history_tables(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS customer_part_number (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_no TEXT NOT NULL,
+            customer_no TEXT NOT NULL,
+            part_number TEXT NOT NULL DEFAULT '',
+            updated_by TEXT,
+            updated_at TEXT NOT NULL,
+            UNIQUE(item_no, customer_no)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS vendor_part_number (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_no TEXT NOT NULL,
+            vendor_no TEXT NOT NULL,
+            part_number TEXT NOT NULL DEFAULT '',
+            updated_by TEXT,
+            updated_at TEXT NOT NULL,
+            UNIQUE(item_no, vendor_no)
+        )
+    """)
+
+
+def ensure_purchase_request_remarks_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS purchase_request_remarks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            row_key TEXT NOT NULL UNIQUE,
+            remark TEXT NOT NULL DEFAULT '',
+            updated_by TEXT,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+
+def ensure_sales_delivery_remarks_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sales_delivery_remarks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            row_key TEXT NOT NULL UNIQUE,
+            remark TEXT NOT NULL DEFAULT '',
+            updated_by TEXT,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+
+def ensure_delivery_time_tracking_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS delivery_time_tracking (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            arinvoice_id INTEGER NOT NULL UNIQUE,
+            document_type TEXT NOT NULL DEFAULT '',
+            do_remarks TEXT NOT NULL DEFAULT '',
+            expedition TEXT NOT NULL DEFAULT '',
+            delivery_note TEXT NOT NULL DEFAULT '',
+            tracking_number TEXT NOT NULL DEFAULT '',
+            etd TEXT NOT NULL DEFAULT '',
+            customer_eta TEXT NOT NULL DEFAULT '',
+            receive_date TEXT NOT NULL DEFAULT '',
+            target_do_return TEXT NOT NULL DEFAULT '',
+            do_return_date TEXT NOT NULL DEFAULT '',
+            delivery_issue TEXT NOT NULL DEFAULT '',
+            updated_by TEXT,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("PRAGMA table_info(delivery_time_tracking)")
+    columns = {row[1] for row in cur.fetchall()}
+    if "target_do_return" not in columns:
+        cur.execute(
+            "ALTER TABLE delivery_time_tracking "
+            "ADD COLUMN target_do_return TEXT NOT NULL DEFAULT ''"
+        )
+    if "do_return_date" not in columns:
+        cur.execute(
+            "ALTER TABLE delivery_time_tracking "
+            "ADD COLUMN do_return_date TEXT NOT NULL DEFAULT ''"
+        )
+
+
 def init_db():
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
@@ -223,18 +380,47 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS barang_baru_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            itemid INTEGER UNIQUE NOT NULL,
+            source_key TEXT NOT NULL DEFAULT 'legacy',
+            itemid INTEGER NOT NULL,
             itemno TEXT NOT NULL,
             description TEXT,
             description2 TEXT,
             unit TEXT,
             type TEXT,
             created_by TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            UNIQUE(source_key, itemid)
         )
     """)
     cur.execute("PRAGMA table_info(barang_baru_log)")
     barang_baru_columns = {row[1] for row in cur.fetchall()}
+    if "source_key" not in barang_baru_columns:
+        cur.execute("ALTER TABLE barang_baru_log RENAME TO barang_baru_log_legacy")
+        cur.execute("""
+            CREATE TABLE barang_baru_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_key TEXT NOT NULL DEFAULT 'legacy',
+                itemid INTEGER NOT NULL,
+                itemno TEXT NOT NULL,
+                description TEXT,
+                description2 TEXT,
+                unit TEXT,
+                type TEXT,
+                created_by TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(source_key, itemid)
+            )
+        """)
+        cur.execute("""
+            INSERT INTO barang_baru_log
+                (id, source_key, itemid, itemno, description, description2,
+                 unit, type, created_by, created_at)
+            SELECT id, 'legacy', itemid, itemno, description, description2,
+                   unit, type, created_by, created_at
+            FROM barang_baru_log_legacy
+        """)
+        cur.execute("DROP TABLE barang_baru_log_legacy")
+        barang_baru_columns.add("source_key")
     if "created_by" not in barang_baru_columns:
         cur.execute("ALTER TABLE barang_baru_log ADD COLUMN created_by TEXT")
 
@@ -244,6 +430,13 @@ def init_db():
     ensure_liw_purchase_notes_table(cur)
     ensure_project_manual_realization_table(cur)
     ensure_project_report_notes_table(cur)
+    ensure_project_remarks_table(cur)
+    ensure_profit_loss_manual_cost_table(cur)
+    ensure_sales_document_checklist_table(cur)
+    ensure_part_number_history_tables(cur)
+    ensure_purchase_request_remarks_table(cur)
+    ensure_sales_delivery_remarks_table(cur)
+    ensure_delivery_time_tracking_table(cur)
 
     # ── Permission Matrix ──────────────────────────────────────────────────
     # admin     → semua modul
@@ -263,7 +456,8 @@ def init_db():
         ("inventory",  "dashboard"), ("inventory",  "stock"),
         ("inventory",  "barang-baru"), ("inventory","riwayat"),
         ("inventory",  "permintaan"), ("inventory",  "penerimaan"),
-        ("inventory",  "penjualan_do"), ("inventory", "kolaborasi"),
+        ("inventory",  "penjualan_do"), ("inventory", "waktu_pengiriman"),
+        ("inventory",  "kolaborasi"),
 
         ("purchasing", "dashboard"), ("purchasing", "pembelian"),
         ("purchasing", "kolaborasi"),
@@ -285,6 +479,7 @@ def init_db():
     # INSERT OR IGNORE = idempotent, aman dijalankan berulang kali
     cur.executemany("INSERT OR IGNORE INTO roles (role, module) VALUES (?, ?)", roles)
     sync_marketing_permissions(cur)
+    sync_akutansi_staff_permissions(cur)
 
     cur.execute("SELECT COUNT(*) FROM users WHERE username = 'admin'")
     if cur.fetchone()[0] == 0:
@@ -314,6 +509,9 @@ def get_user_permissions(role):
     cur = con.cursor()
     if role == "marketing":
         sync_marketing_permissions(cur)
+        con.commit()
+    elif role == "akutansi_staff":
+        sync_akutansi_staff_permissions(cur)
         con.commit()
     cur.execute("SELECT module FROM roles WHERE role = ?", (role,))
     rows = cur.fetchall()
@@ -384,6 +582,9 @@ def upsert_role(role, modules, column_permissions=None):
     clean_modules = sorted({(m or "").strip() for m in modules or [] if (m or "").strip()})
     if not role:
         return False, "Nama role wajib diisi"
+    if role == "akutansi_staff":
+        clean_modules = sorted(AKUTANSI_STAFF_MODULES)
+        column_permissions = {}
 
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
@@ -691,16 +892,23 @@ def save_salesman_targets(year, rows, updated_by=None):
     con.close()
     return len(payload)
 
+def is_excluded_barang_baru(itemno):
+    normalized = str(itemno or "").strip().upper()
+    return normalized.startswith(BARANG_BARU_EXCLUDED_PREFIXES)
+
+
 def save_barang_baru(item):
+    if is_excluded_barang_baru(item.get("itemno")):
+        return False
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
     try:
         cur.execute("""
             INSERT OR IGNORE INTO barang_baru_log
-            (itemid, itemno, description, description2, unit, type, created_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (source_key, itemid, itemno, description, description2, unit, type, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            item["itemid"], item["itemno"], item["description"],
+            item.get("source_key", "legacy"), item["itemid"], item["itemno"], item["description"],
             item["description2"], item["unit"], item.get("type", ""),
             item.get("created_by", ""), item["created_at"]
         ))
@@ -708,10 +916,11 @@ def save_barang_baru(item):
             cur.execute("""
                 UPDATE barang_baru_log
                 SET created_by = ?
-                WHERE itemid = ?
+                WHERE source_key = ? AND itemid = ?
                   AND (created_by IS NULL OR TRIM(created_by) = '')
-            """, (item.get("created_by", ""), item["itemid"]))
+            """, (item.get("created_by", ""), item.get("source_key", "legacy"), item["itemid"]))
         con.commit()
+        return True
     except Exception as e:
         print(f"Error save_barang_baru: {e}")
     finally:
@@ -720,8 +929,8 @@ def save_barang_baru(item):
 def get_barang_baru_log(date_from=None, date_to=None):
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
-    conditions = ["1=1"]
-    params = []
+    conditions = ["UPPER(TRIM(itemno)) NOT LIKE ?" for _ in BARANG_BARU_EXCLUDED_PREFIXES]
+    params = [f"{prefix}%" for prefix in BARANG_BARU_EXCLUDED_PREFIXES]
     if date_from:
         conditions.append("created_at >= ?")
         params.append(date_from)
@@ -730,24 +939,36 @@ def get_barang_baru_log(date_from=None, date_to=None):
         params.append(date_to + " 23:59:59")
     where = " AND ".join(conditions)
     cur.execute(f"""
-        SELECT itemid, itemno, description, description2, unit, type, created_by, created_at
+        SELECT id, source_key, itemid, itemno, description, description2, unit, type, created_by, created_at
         FROM barang_baru_log WHERE {where} ORDER BY created_at DESC
     """, params)
     rows = cur.fetchall()
     con.close()
     return [{
-        "itemid": r[0], "itemno": r[1], "description": r[2],
-        "description2": r[3], "unit": r[4], "type": r[5],
-        "created_by": r[6], "created_at": r[7]
+        "log_id": r[0], "source_key": r[1], "itemid": r[2], "itemno": r[3], "description": r[4],
+        "description2": r[5], "unit": r[6], "type": r[7],
+        "created_by": r[8], "created_at": r[9]
     } for r in rows]
 
-def get_max_logged_itemid():
+def get_max_logged_itemid(source_key=None):
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
-    cur.execute("SELECT MAX(itemid) FROM barang_baru_log")
+    if source_key:
+        cur.execute("SELECT MAX(itemid) FROM barang_baru_log WHERE source_key = ?", (source_key,))
+    else:
+        cur.execute("SELECT MAX(itemid) FROM barang_baru_log")
     row = cur.fetchone()
     con.close()
     return int(row[0] or 0)
+
+
+def get_logged_itemnos():
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT DISTINCT itemno FROM barang_baru_log WHERE TRIM(itemno) <> ''")
+    result = [str(row[0]).strip() for row in cur.fetchall()]
+    con.close()
+    return result
 
 
 def get_max_logged_itemhistid():
@@ -899,6 +1120,576 @@ def save_project_manual_realization(project_no, account_no, amount, note="", upd
         "account_no": (account_no or "").strip(),
         "amount": float(amount or 0),
         "note": note or "",
+        "updated_by": updated_by or "",
+        "updated_at": now,
+    }
+
+
+def get_project_remarks_for_projects(project_nos):
+    normalized_project_nos = sorted({
+        str(project_no or "").strip().upper()
+        for project_no in project_nos
+        if str(project_no or "").strip()
+    })
+    if not normalized_project_nos:
+        return {}
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_project_remarks_table(cur)
+    result = {}
+    for index in range(0, len(normalized_project_nos), 900):
+        chunk = normalized_project_nos[index:index + 900]
+        placeholders = ", ".join(["?"] * len(chunk))
+        cur.execute(f"""
+            SELECT project_no, remarks, updated_by, updated_at
+            FROM project_remarks
+            WHERE UPPER(TRIM(project_no)) IN ({placeholders})
+        """, chunk)
+        for row in cur.fetchall():
+            key = str(row[0] or "").strip().upper()
+            result[key] = {
+                "project_no": row[0] or "",
+                "remarks": row[1] or "",
+                "updated_by": row[2] or "",
+                "updated_at": row[3] or "",
+            }
+    con.close()
+    return result
+
+
+def save_project_remark(project_no, remarks="", updated_by=None):
+    normalized_project_no = str(project_no or "").strip()
+    normalized_remarks = str(remarks or "").strip()
+    now = datetime.now().isoformat(timespec="seconds")
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_project_remarks_table(cur)
+    cur.execute("""
+        INSERT INTO project_remarks (project_no, remarks, updated_by, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(project_no) DO UPDATE SET
+            remarks = excluded.remarks,
+            updated_by = excluded.updated_by,
+            updated_at = excluded.updated_at
+    """, (normalized_project_no, normalized_remarks, updated_by, now))
+    con.commit()
+    con.close()
+    return {
+        "project_no": normalized_project_no,
+        "remarks": normalized_remarks,
+        "updated_by": updated_by or "",
+        "updated_at": now,
+    }
+
+
+def get_profit_loss_manual_costs(row_keys):
+    normalized_keys = sorted({
+        str(row_key or "").strip()
+        for row_key in row_keys
+        if str(row_key or "").strip()
+    })
+    if not normalized_keys:
+        return {}
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_profit_loss_manual_cost_table(cur)
+    result = {}
+    for index in range(0, len(normalized_keys), 900):
+        chunk = normalized_keys[index:index + 900]
+        placeholders = ", ".join(["?"] * len(chunk))
+        cur.execute(f"""
+            SELECT row_key, cf, mf, project_cost, updated_by, updated_at
+            FROM profit_loss_manual_cost
+            WHERE row_key IN ({placeholders})
+        """, chunk)
+        for row in cur.fetchall():
+            result[row[0]] = {
+                "cf": float(row[1] or 0),
+                "mf": float(row[2] or 0),
+                "biaya_project": float(row[3] or 0),
+                "updated_by": row[4] or "",
+                "updated_at": row[5] or "",
+            }
+    con.close()
+    return result
+
+
+def save_profit_loss_manual_cost(row_key, cf=0, mf=0, project_cost=0, updated_by=None):
+    normalized_key = str(row_key or "").strip()
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_profit_loss_manual_cost_table(cur)
+    now = datetime.now().isoformat(timespec="seconds")
+    cur.execute("""
+        INSERT INTO profit_loss_manual_cost
+            (row_key, cf, mf, project_cost, updated_by, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(row_key) DO UPDATE SET
+            cf = excluded.cf,
+            mf = excluded.mf,
+            project_cost = excluded.project_cost,
+            updated_by = excluded.updated_by,
+            updated_at = excluded.updated_at
+    """, (
+        normalized_key,
+        float(cf or 0),
+        float(mf or 0),
+        float(project_cost or 0),
+        updated_by,
+        now,
+    ))
+    con.commit()
+    con.close()
+    return {
+        "row_key": normalized_key,
+        "cf": float(cf or 0),
+        "mf": float(mf or 0),
+        "biaya_project": float(project_cost or 0),
+        "updated_by": updated_by or "",
+        "updated_at": now,
+    }
+
+
+def get_sales_document_checklists(so_numbers):
+    normalized = sorted({
+        str(so_no or "").strip()
+        for so_no in so_numbers
+        if str(so_no or "").strip()
+    })
+    if not normalized:
+        return {}
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_sales_document_checklist_table(cur)
+    result = {}
+    for index in range(0, len(normalized), 900):
+        chunk = normalized[index:index + 900]
+        placeholders = ", ".join(["?"] * len(chunk))
+        cur.execute(f"""
+            SELECT so_no, document_key, is_required, is_completed,
+                   updated_by, updated_at, validated_by, validated_at,
+                   document_label, department, is_custom
+            FROM sales_document_checklist
+            WHERE so_no IN ({placeholders})
+        """, chunk)
+        for row in cur.fetchall():
+            result.setdefault(row[0], {})[row[1]] = {
+                "required": bool(row[2]),
+                "completed": bool(row[3]),
+                "updated_by": row[4] or "",
+                "updated_at": row[5] or "",
+                "validated_by": row[6] or "",
+                "validated_at": row[7] or "",
+                "label": row[8] or "",
+                "department": row[9] or "",
+                "is_custom": bool(row[10]),
+            }
+    con.close()
+    return result
+
+
+def save_sales_document_checklist(
+    so_no,
+    document_key,
+    is_required,
+    is_completed,
+    updated_by=None,
+    document_label="",
+    department="",
+    is_custom=False,
+):
+    normalized_so = str(so_no or "").strip()
+    normalized_key = str(document_key or "").strip().lower()
+    required = bool(is_required)
+    completed = bool(is_completed) if required else False
+    now = datetime.now().isoformat(timespec="seconds")
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_sales_document_checklist_table(cur)
+    cur.execute("""
+        INSERT INTO sales_document_checklist (
+            so_no, document_key, is_required, is_completed,
+            updated_by, updated_at, validated_by, validated_at,
+            document_label, department, is_custom
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(so_no, document_key) DO UPDATE SET
+            is_required = excluded.is_required,
+            is_completed = excluded.is_completed,
+            updated_by = excluded.updated_by,
+            updated_at = excluded.updated_at,
+            validated_by = excluded.validated_by,
+            validated_at = excluded.validated_at,
+            document_label = CASE
+                WHEN excluded.document_label <> '' THEN excluded.document_label
+                ELSE sales_document_checklist.document_label
+            END,
+            department = CASE
+                WHEN excluded.department <> '' THEN excluded.department
+                ELSE sales_document_checklist.department
+            END,
+            is_custom = CASE
+                WHEN excluded.is_custom = 1 THEN 1
+                ELSE sales_document_checklist.is_custom
+            END
+    """, (
+        normalized_so,
+        normalized_key,
+        int(required),
+        int(completed),
+        updated_by,
+        now,
+        updated_by if completed else None,
+        now if completed else None,
+        str(document_label or "").strip(),
+        str(department or "").strip().upper(),
+        int(bool(is_custom)),
+    ))
+    con.commit()
+    con.close()
+    return {
+        "so_no": normalized_so,
+        "document_key": normalized_key,
+        "required": required,
+        "completed": completed,
+        "updated_by": updated_by or "",
+        "updated_at": now,
+        "validated_by": updated_by or "" if completed else "",
+        "validated_at": now if completed else "",
+        "label": str(document_label or "").strip(),
+        "department": str(department or "").strip().upper(),
+        "is_custom": bool(is_custom),
+    }
+
+
+def delete_sales_custom_document(so_no, document_key):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_sales_document_checklist_table(cur)
+    cur.execute("""
+        DELETE FROM sales_document_checklist
+        WHERE so_no = ? AND document_key = ? AND is_custom = 1
+    """, (
+        str(so_no or "").strip(),
+        str(document_key or "").strip().lower(),
+    ))
+    deleted = cur.rowcount > 0
+    con.commit()
+    con.close()
+    return deleted
+
+
+def get_customer_part_numbers(keys):
+    normalized = sorted({
+        (str(item_no or "").strip(), str(customer_no or "").strip())
+        for item_no, customer_no in keys
+        if str(item_no or "").strip() and str(customer_no or "").strip()
+    })
+    if not normalized:
+        return {}
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_part_number_history_tables(cur)
+    result = {}
+    for item_no, customer_no in normalized:
+        cur.execute("""
+            SELECT part_number, updated_by, updated_at
+            FROM customer_part_number
+            WHERE item_no = ? AND customer_no = ?
+        """, (item_no, customer_no))
+        row = cur.fetchone()
+        if row:
+            result[(item_no, customer_no)] = {
+                "part_number": row[0] or "",
+                "updated_by": row[1] or "",
+                "updated_at": row[2] or "",
+            }
+    con.close()
+    return result
+
+
+def get_vendor_part_numbers(keys):
+    normalized = sorted({
+        (str(item_no or "").strip(), str(vendor_no or "").strip())
+        for item_no, vendor_no in keys
+        if str(item_no or "").strip() and str(vendor_no or "").strip()
+    })
+    if not normalized:
+        return {}
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_part_number_history_tables(cur)
+    result = {}
+    for item_no, vendor_no in normalized:
+        cur.execute("""
+            SELECT part_number, updated_by, updated_at
+            FROM vendor_part_number
+            WHERE item_no = ? AND vendor_no = ?
+        """, (item_no, vendor_no))
+        row = cur.fetchone()
+        if row:
+            result[(item_no, vendor_no)] = {
+                "part_number": row[0] or "",
+                "updated_by": row[1] or "",
+                "updated_at": row[2] or "",
+            }
+    con.close()
+    return result
+
+
+def save_part_number(kind, item_no, party_no, part_number, updated_by=None):
+    if kind not in ("customer", "vendor"):
+        raise ValueError("Jenis part number tidak valid")
+    table = "customer_part_number" if kind == "customer" else "vendor_part_number"
+    party_column = "customer_no" if kind == "customer" else "vendor_no"
+    normalized_item = str(item_no or "").strip()
+    normalized_party = str(party_no or "").strip()
+    normalized_part = str(part_number or "").strip()
+    now = datetime.now().isoformat(timespec="seconds")
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_part_number_history_tables(cur)
+    cur.execute(f"""
+        INSERT INTO {table} (item_no, {party_column}, part_number, updated_by, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(item_no, {party_column}) DO UPDATE SET
+            part_number = excluded.part_number,
+            updated_by = excluded.updated_by,
+            updated_at = excluded.updated_at
+    """, (normalized_item, normalized_party, normalized_part, updated_by, now))
+    con.commit()
+    con.close()
+    return {
+        "kind": kind,
+        "item_no": normalized_item,
+        "party_no": normalized_party,
+        "part_number": normalized_part,
+        "updated_by": updated_by or "",
+        "updated_at": now,
+    }
+
+
+def get_purchase_request_remarks(row_keys):
+    normalized = sorted({
+        str(row_key or "").strip()
+        for row_key in row_keys
+        if str(row_key or "").strip()
+    })
+    if not normalized:
+        return {}
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_purchase_request_remarks_table(cur)
+    result = {}
+    for index in range(0, len(normalized), 900):
+        chunk = normalized[index:index + 900]
+        placeholders = ", ".join(["?"] * len(chunk))
+        cur.execute(f"""
+            SELECT row_key, remark, updated_by, updated_at
+            FROM purchase_request_remarks
+            WHERE row_key IN ({placeholders})
+        """, chunk)
+        for row in cur.fetchall():
+            result[row[0]] = {
+                "remark": row[1] or "",
+                "updated_by": row[2] or "",
+                "updated_at": row[3] or "",
+            }
+    con.close()
+    return result
+
+
+def save_purchase_request_remark(row_key, remark="", updated_by=None):
+    normalized_key = str(row_key or "").strip()
+    normalized_remark = str(remark or "").strip()
+    now = datetime.now().isoformat(timespec="seconds")
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_purchase_request_remarks_table(cur)
+    cur.execute("""
+        INSERT INTO purchase_request_remarks (row_key, remark, updated_by, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(row_key) DO UPDATE SET
+            remark = excluded.remark,
+            updated_by = excluded.updated_by,
+            updated_at = excluded.updated_at
+    """, (normalized_key, normalized_remark, updated_by, now))
+    con.commit()
+    con.close()
+    return {
+        "row_key": normalized_key,
+        "remark": normalized_remark,
+        "updated_by": updated_by or "",
+        "updated_at": now,
+    }
+
+
+def get_sales_delivery_remarks(row_keys):
+    normalized = sorted({
+        str(row_key or "").strip()
+        for row_key in row_keys
+        if str(row_key or "").strip()
+    })
+    if not normalized:
+        return {}
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_sales_delivery_remarks_table(cur)
+    result = {}
+    for index in range(0, len(normalized), 900):
+        chunk = normalized[index:index + 900]
+        placeholders = ", ".join(["?"] * len(chunk))
+        cur.execute(f"""
+            SELECT row_key, remark, updated_by, updated_at
+            FROM sales_delivery_remarks
+            WHERE row_key IN ({placeholders})
+        """, chunk)
+        for row in cur.fetchall():
+            result[row[0]] = {
+                "remark": row[1] or "",
+                "updated_by": row[2] or "",
+                "updated_at": row[3] or "",
+            }
+    con.close()
+    return result
+
+
+def save_sales_delivery_remark(row_key, remark="", updated_by=None):
+    normalized_key = str(row_key or "").strip()
+    normalized_remark = str(remark or "").strip()
+    now = datetime.now().isoformat(timespec="seconds")
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_sales_delivery_remarks_table(cur)
+    cur.execute("""
+        INSERT INTO sales_delivery_remarks (row_key, remark, updated_by, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(row_key) DO UPDATE SET
+            remark = excluded.remark,
+            updated_by = excluded.updated_by,
+            updated_at = excluded.updated_at
+    """, (normalized_key, normalized_remark, updated_by, now))
+    con.commit()
+    con.close()
+    return {
+        "row_key": normalized_key,
+        "remark": normalized_remark,
+        "updated_by": updated_by or "",
+        "updated_at": now,
+    }
+
+
+def get_delivery_time_tracking(arinvoice_ids):
+    normalized = sorted({
+        int(value)
+        for value in arinvoice_ids
+        if str(value or "").strip().isdigit()
+    })
+    if not normalized:
+        return {}
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_delivery_time_tracking_table(cur)
+    result = {}
+    for index in range(0, len(normalized), 900):
+        chunk = normalized[index:index + 900]
+        placeholders = ", ".join(["?"] * len(chunk))
+        cur.execute(f"""
+            SELECT
+                arinvoice_id, document_type, do_remarks, expedition,
+                delivery_note, tracking_number, etd, customer_eta,
+                receive_date, target_do_return, do_return_date,
+                delivery_issue, updated_by, updated_at
+            FROM delivery_time_tracking
+            WHERE arinvoice_id IN ({placeholders})
+        """, chunk)
+        for row in cur.fetchall():
+            result[int(row[0])] = {
+                "jenis_dokumen": row[1] or "",
+                "remarks_do": row[2] or "",
+                "expedition": row[3] or "",
+                "ket_pengiriman": row[4] or "",
+                "resi": row[5] or "",
+                "etd": row[6] or "",
+                "eta_cust": row[7] or "",
+                "receive_date": row[8] or "",
+                "target_do_kembali": row[9] or "",
+                "do_kembali": row[10] or "",
+                "isue_pengiriman": row[11] or "",
+                "updated_by": row[12] or "",
+                "updated_at": row[13] or "",
+            }
+    con.close()
+    return result
+
+
+def save_delivery_time_tracking(arinvoice_id, values, updated_by=None):
+    normalized_id = int(arinvoice_id)
+    normalized = {
+        "jenis_dokumen": str(values.get("jenis_dokumen") or "").strip(),
+        "remarks_do": str(values.get("remarks_do") or "").strip(),
+        "expedition": str(values.get("expedition") or "").strip(),
+        "ket_pengiriman": str(values.get("ket_pengiriman") or "").strip(),
+        "resi": str(values.get("resi") or "").strip(),
+        "etd": str(values.get("etd") or "").strip(),
+        "eta_cust": str(values.get("eta_cust") or "").strip(),
+        "receive_date": str(values.get("receive_date") or "").strip(),
+        "target_do_kembali": str(values.get("target_do_kembali") or "").strip(),
+        "do_kembali": str(values.get("do_kembali") or "").strip(),
+        "isue_pengiriman": str(values.get("isue_pengiriman") or "").strip(),
+    }
+    now = datetime.now().isoformat(timespec="seconds")
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_delivery_time_tracking_table(cur)
+    cur.execute("""
+        INSERT INTO delivery_time_tracking (
+            arinvoice_id, document_type, do_remarks, expedition,
+            delivery_note, tracking_number, etd, customer_eta,
+            receive_date, target_do_return, do_return_date,
+            delivery_issue, updated_by, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(arinvoice_id) DO UPDATE SET
+            document_type = excluded.document_type,
+            do_remarks = excluded.do_remarks,
+            expedition = excluded.expedition,
+            delivery_note = excluded.delivery_note,
+            tracking_number = excluded.tracking_number,
+            etd = excluded.etd,
+            customer_eta = excluded.customer_eta,
+            receive_date = excluded.receive_date,
+            target_do_return = excluded.target_do_return,
+            do_return_date = excluded.do_return_date,
+            delivery_issue = excluded.delivery_issue,
+            updated_by = excluded.updated_by,
+            updated_at = excluded.updated_at
+    """, (
+        normalized_id,
+        normalized["jenis_dokumen"],
+        normalized["remarks_do"],
+        normalized["expedition"],
+        normalized["ket_pengiriman"],
+        normalized["resi"],
+        normalized["etd"],
+        normalized["eta_cust"],
+        normalized["receive_date"],
+        normalized["target_do_kembali"],
+        normalized["do_kembali"],
+        normalized["isue_pengiriman"],
+        updated_by,
+        now,
+    ))
+    con.commit()
+    con.close()
+    return {
+        "arinvoice_id": normalized_id,
+        **normalized,
         "updated_by": updated_by or "",
         "updated_at": now,
     }

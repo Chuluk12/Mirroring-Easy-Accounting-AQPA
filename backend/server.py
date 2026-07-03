@@ -11,17 +11,29 @@ from auth import (
     init_db, get_user, get_user_permissions,
     get_all_users, get_user_by_id, create_user, delete_user, update_user_password, verify_password,
     upsert_role, delete_role, get_all_column_permissions, get_user_column_permissions,
-    save_barang_baru, get_barang_baru_log, get_max_logged_itemid,
+    save_barang_baru, get_barang_baru_log, get_max_logged_itemid, get_logged_itemnos,
+    is_excluded_barang_baru,
     log_activity, get_audit_logs, get_salesman_targets, save_salesman_targets,
     get_max_logged_itemhistid, save_itemhist_detected_ids, get_itemhist_detected_ids,
     get_liw_purchase_notes, save_liw_purchase_note, save_liw_delivery_note,
     get_project_manual_realizations, get_project_manual_realizations_for_projects, save_project_manual_realization,
-    get_project_report_note, save_project_report_note
+    get_project_report_note, save_project_report_note,
+    get_project_remarks_for_projects, save_project_remark,
+    get_profit_loss_manual_costs, save_profit_loss_manual_cost,
+    get_sales_document_checklists, save_sales_document_checklist,
+    delete_sales_custom_document,
+    get_customer_part_numbers, get_vendor_part_numbers, save_part_number,
+    get_purchase_request_remarks, save_purchase_request_remark,
+    get_sales_delivery_remarks, save_sales_delivery_remark,
+    get_delivery_time_tracking, save_delivery_time_tracking
 )
 import fdb
+import hmac
 import os
+import re
 import threading
 import time
+import uuid
 
 app = Flask(__name__)
 CORS(app)
@@ -61,10 +73,12 @@ def load_env_file(path):
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        os.environ[key.strip()] = value.strip().strip('"').strip("'")
 
 
 load_env_file(Path(__file__).with_name(".env"))
+
+DRIVER_INTEGRATION_API_KEY = os.getenv("DRIVER_INTEGRATION_API_KEY", "").strip()
 
 DB_CONFIG = {
     "host": os.getenv("EASY_DB_HOST", "192.168.10.5"),
@@ -88,7 +102,7 @@ BACKEND_PORT = int(os.getenv("EASY_BACKEND_PORT", "5000"))
 
 MODULE_COLUMNS = {
     "stock": [
-        "itemno", "description", "description2", "quantity", "stock_sistem", "minimum_qty", "unit", "category",
+        "itemno", "description", "description2", "quantity", "stock_sistem", "stock_centre", "minimum_qty", "unit", "category",
         "cost_description", "stock_note", "code_product",
     ],
     "siinas": [
@@ -108,9 +122,11 @@ MODULE_COLUMNS = {
         "keterangan", "status_lacak", "is_backdate_detected",
     ],
     "permintaan": [
-        "no_permintaan", "tgl_permintaan", "tgl_target", "deskripsi", "no_barang",
+        "no_permintaan", "tgl_permintaan", "tgl_target", "no_so", "deskripsi", "no_barang",
         "deskripsi_barang", "qty", "qty_ordered", "qty_received", "unit", "no_po",
-        "status", "status_color",
+        "tgl_pesanan_po", "estimasi_po", "vendor", "qty_po",
+        "aging", "status_dt_po", "remark", "remark_updated_by", "remark_updated_at",
+        "row_key", "status", "status_color",
     ],
     "pembelian": [
         "no_pembelian", "tgl_pembelian", "tgl_ekspetasi", "top",
@@ -152,9 +168,19 @@ MODULE_COLUMNS = {
         "disc_pct", "ppn_kode", "ppn_rate", "ppn_amount", "amount",
     ],
     "penjualan_do": [
-        "no_pengiriman", "tgl_pengiriman", "no_pelanggan", "nama_pelanggan", "no_po",
-        "no_pesanan", "tgl_pesanan", "deskripsi", "no_barang", "deskripsi_barang",
-        "qty", "uom", "no_do",
+        "marketing", "no_pesanan", "tgl_pesanan", "tgl_estimasi_so",
+        "no_pelanggan", "nama_pelanggan", "no_po",
+        "no_pengiriman", "tgl_pengiriman", "no_barang", "deskripsi_barang",
+        "qty_so", "qty_shipped", "stok_barang", "uom", "no_do", "deskripsi",
+        "status_so", "status_do", "umur", "keterangan_so", "remark", "row_key",
+    ],
+    "waktu_pengiriman": [
+        "arinvoice_id", "no_pengiriman", "tgl_pengiriman", "no_so", "no_po",
+        "customer", "jenis_dokumen", "remarks_do", "expedition",
+        "ket_pengiriman", "resi", "etd", "eta_cust", "receive_date",
+        "status_pengiriman",
+        "target_do_kembali", "do_kembali", "status_do_kembali",
+        "isue_pengiriman", "updated_by", "updated_at",
     ],
     "invoice": [
         "no_faktur", "tgl_faktur", "no_po", "no_pesanan", "no_pengiriman",
@@ -210,8 +236,11 @@ MODULE_COLUMNS = {
     "profit_loss": [
         "no_faktur", "no_do", "no_so", "tgl_faktur", "no_barang", "deskripsi_barang",
         "qty_faktur", "uom", "harga_satuan", "jumlah", "nilai_hpp",
-        "delivery", "gross_profit", "margin_pct", "no_pelanggan", "nama_pelanggan",
-        "no_po", "no_delivery",
+        "delivery", "delivery_details", "delivery_ju", "delivery_ju_details",
+        "cf", "cf_pct", "cf_details", "mf", "mf_pct", "mf_details", "biaya_project", "total_biaya", "laba_operasi",
+        "gross_profit", "margin_pct", "no_pelanggan", "nama_pelanggan",
+        "no_po", "marketing", "no_delivery", "no_jurnal_delivery_ju",
+        "manual_cost_key",
     ],
     "aset": [
         "no_aktiva", "nama_aktiva", "tanggal_aktiva", "nilai_aktiva",
@@ -224,13 +253,16 @@ MODULE_COLUMNS = {
     "project": [
         "project_id", "no_project", "nama_project", "nama_kontak",
         "tanggal_mulai", "tanggal_selesai", "komplit", "deskripsi",
-        "rab", "realisasi", "profit_rab", "profit_realisasi", "selisih",
-        "average_pct", "status", "dihentikan",
+        "rab", "realisasi", "selisih", "value_profit_rab", "profit_rab",
+        "value_profit_realisasi", "profit_realisasi", "remarks",
+        "remarks_updated_by", "remarks_updated_at", "average_pct", "status",
+        "dihentikan",
     ],
     "project_report": [
         "no_akun", "manual_account_key", "nama_akun", "rab", "realisasi", "is_manual",
         "manual_note", "manual_updated_by", "manual_updated_at", "has_easy_realization",
         "is_total", "is_percentage", "show_rab_percentage", "show_realisasi_percentage",
+        "realization_source", "source_references", "fee_details",
     ],
     "project_detail": [
         "tanggal", "no_project", "nama_project", "no_akun", "nama_akun",
@@ -266,6 +298,7 @@ MODULE_COLUMN_PARENTS = {
     "penjualan_so": "penjualan",
     "penjualan": "penjualan",
     "penjualan_do": "penjualan",
+    "waktu_pengiriman": "penjualan",
     "invoice": "penjualan",
     "salesman": "penjualan",
     "customer": "penjualan",
@@ -288,7 +321,7 @@ MODULE_COLUMN_PARENTS = {
 MODULE_REQUIRED_RESPONSE_KEYS = {
     "stock": ["itemno"],
     "siinas": ["no_barang"],
-    "barang-baru": ["itemno"],
+    "barang-baru": ["log_id", "itemno"],
     "riwayat": ["itemhistid", "itemno"],
     "permintaan": ["no_permintaan", "no_barang"],
     "pembelian": ["no_pembelian", "no_barang"],
@@ -297,6 +330,7 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "penjualan_so": ["no_so", "no_barang"],
     "penjualan": ["no_penjualan", "no_barang"],
     "penjualan_do": ["no_pengiriman", "no_barang"],
+    "waktu_pengiriman": ["arinvoice_id", "no_pengiriman"],
     "invoice": ["no_faktur"],
     "salesman": ["salesman_id", "targets"],
     "customer": ["customer_id", "no_pelanggan", "nama_pelanggan"],
@@ -313,7 +347,7 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "spm": ["no_pengeluaran", "no_barang"],
     "gp": ["no_hasil", "no_barang"],
     "hpp": ["no_barang", "sales_details"],
-    "profit_loss": ["no_faktur", "no_barang", "no_so"],
+    "profit_loss": ["no_faktur", "no_barang", "no_so", "delivery_details", "delivery_ju_details", "cf_pct", "cf_details", "mf_pct", "mf_details"],
     "aset": ["no_aktiva"],
     "aset_bangunan": ["tanggal", "no_project", "nilai"],
     "project": ["project_id", "no_project", "nama_project"],
@@ -331,6 +365,7 @@ MODULE_PERMISSION_PARENTS = {
     "fpb": "pembelian",
     "salesman": "penjualan",
     "customer": "penjualan",
+    "waktu_pengiriman": "penjualan_do",
 }
 
 def filter_record_columns(module, rows, user=None):
@@ -854,7 +889,19 @@ def build_liw_pur_mkt_rows(cur, search="", date_from="", date_to="", po_type="",
     params_where = []
 
     if search:
-        conditions.append("""(
+        cur.execute("""
+            SELECT DISTINCT ardet_temp.SOID, ardet_temp.SOSEQ, ardet_temp.ITEMNO
+            FROM ARINV_TEMP ar_temp
+            JOIN ARINVDET_TEMP ardet_temp
+              ON ardet_temp.ARINVOICEID_TEMP = ar_temp.ARINVOICEID_TEMP
+            WHERE UPPER(TRIM(COALESCE(ar_temp.INVOICENO, ''))) STARTING WITH 'AI-TDO-'
+              AND LOWER(ar_temp.INVOICENO) CONTAINING LOWER(?)
+        """, [search])
+        temp_search_keys = [
+            (int(row[0]), int(row[1]), str(row[2] or "").strip())
+            for row in cur.fetchall()
+        ]
+        search_parts = ["""(
             LOWER(so.SONO) CONTAINING LOWER(?)
             OR LOWER(pd.NAME) CONTAINING LOWER(?)
             OR LOWER(sodet.ITEMNO) CONTAINING LOWER(?)
@@ -862,8 +909,15 @@ def build_liw_pur_mkt_rows(cur, search="", date_from="", date_to="", po_type="",
             OR LOWER(rq.REQNO) CONTAINING LOWER(?)
             OR LOWER(po.PONO) CONTAINING LOWER(?)
             OR LOWER(COALESCE(delivery_docs.INVOICENO, '')) CONTAINING LOWER(?)
-        )""")
+        )"""]
         params_where += [search, search, search, search, search, search, search]
+        if temp_search_keys:
+            temp_key_parts = []
+            for soid, soseq, itemno in temp_search_keys:
+                temp_key_parts.append("(so.SOID = ? AND sodet.SEQ = ? AND sodet.ITEMNO = ?)")
+                params_where += [soid, soseq, itemno]
+            search_parts.append("(" + " OR ".join(temp_key_parts) + ")")
+        conditions.append("(" + " OR ".join(search_parts) + ")")
 
     if date_from:
         conditions.append("so.SODATE >= ?")
@@ -901,6 +955,7 @@ def build_liw_pur_mkt_rows(cur, search="", date_from="", date_to="", po_type="",
         LEFT JOIN (
             SELECT
                 ardet.SOID,
+                ardet.SOSEQ,
                 ardet.ITEMNO,
                 LIST(DISTINCT ar.INVOICENO, ', ') AS INVOICENO,
                 MAX(ar.INVOICEDATE) AS INVOICEDATE
@@ -908,8 +963,11 @@ def build_liw_pur_mkt_rows(cur, search="", date_from="", date_to="", po_type="",
             JOIN ARINVDET ardet ON ardet.ARINVOICEID = ar.ARINVOICEID
             WHERE ar.DELIVERYORDER IS NOT NULL
               AND TRIM(ar.DELIVERYORDER) <> ''
-            GROUP BY ardet.SOID, ardet.ITEMNO
-        ) delivery_docs ON delivery_docs.SOID = so.SOID AND delivery_docs.ITEMNO = sodet.ITEMNO
+            GROUP BY ardet.SOID, ardet.SOSEQ, ardet.ITEMNO
+        ) delivery_docs
+          ON delivery_docs.SOID = so.SOID
+         AND delivery_docs.SOSEQ = sodet.SEQ
+         AND delivery_docs.ITEMNO = sodet.ITEMNO
     """
 
     cur.execute(f"""
@@ -1017,7 +1075,9 @@ def build_liw_pur_mkt_rows(cur, search="", date_from="", date_to="", po_type="",
             delivery_docs.INVOICENO,
             delivery_docs.INVOICEDATE,
             tm.TERMNAME,
-            tm.NETDAYS
+            tm.NETDAYS,
+            so.SOID,
+            sodet.SEQ
         {from_sql}
         WHERE {where_sql}
         ORDER BY so.SODATE DESC, so.SONO, sodet.SEQ, rq.REQNO, po.PONO
@@ -1083,7 +1143,52 @@ def build_liw_pur_mkt_rows(cur, search="", date_from="", date_to="", po_type="",
             "sisa_hutang_fat": 0,
             "status_fat": "Belum Diajukan",
             "total_easy": 0,
+            "_soid": int(row[35]),
+            "_soseq": int(row[36]),
         })
+
+    temp_delivery_map = {}
+    soids = sorted({row["_soid"] for row in data})
+    for chunk_start in range(0, len(soids), 200):
+        soid_chunk = soids[chunk_start:chunk_start + 200]
+        placeholders = ", ".join("?" for _ in soid_chunk)
+        cur.execute(f"""
+            SELECT
+                ardet_temp.SOID,
+                ardet_temp.SOSEQ,
+                ardet_temp.ITEMNO,
+                ar_temp.INVOICENO,
+                ar_temp.INVOICEDATE
+            FROM ARINV_TEMP ar_temp
+            JOIN ARINVDET_TEMP ardet_temp
+              ON ardet_temp.ARINVOICEID_TEMP = ar_temp.ARINVOICEID_TEMP
+            WHERE ardet_temp.SOID IN ({placeholders})
+              AND UPPER(TRIM(COALESCE(ar_temp.INVOICENO, ''))) STARTING WITH 'AI-TDO-'
+            ORDER BY ar_temp.INVOICEDATE, ar_temp.INVOICENO
+        """, soid_chunk)
+        for temp_row in cur.fetchall():
+            key = (
+                int(temp_row[0]),
+                int(temp_row[1]),
+                str(temp_row[2] or "").strip(),
+            )
+            entry = temp_delivery_map.setdefault(key, {"numbers": [], "date": ""})
+            invoice_no = str(temp_row[3] or "").strip()
+            if invoice_no and invoice_no not in entry["numbers"]:
+                entry["numbers"].append(invoice_no)
+            if temp_row[4]:
+                entry["date"] = str(temp_row[4])
+
+    for row in data:
+        if not row["no_pengiriman_so"]:
+            temp_delivery = temp_delivery_map.get(
+                (row["_soid"], row["_soseq"], row["no_barang_so"])
+            )
+            if temp_delivery:
+                row["no_pengiriman_so"] = ", ".join(temp_delivery["numbers"])
+                row["tgl_kirim_so"] = temp_delivery["date"]
+        row.pop("_soid", None)
+        row.pop("_soseq", None)
 
     note_keys = [
         (
@@ -1372,6 +1477,157 @@ def _centre_stock_expr(item_expr="i.ITEMNO", through_today=False):
     """
 
 
+def _easy_stock_expr(item_expr="i.ITEMNO", through_today=False):
+    """Return Easy Accounting's total item balance across all warehouses.
+
+    SALDO_WHS is Easy's authoritative per-warehouse balance. It can already
+    include posted transactions with a future transaction date, so the
+    through-today variant reverses those future ITEMHIST movements.
+    Warehouse transfers do not need a separate adjustment here because their
+    net effect across all warehouses is zero.
+    """
+    item_expr = item_expr or "i.ITEMNO"
+    saldo_expr = f"""
+        COALESCE((
+            SELECT SUM(sw.QTY)
+            FROM SALDO_WHS sw
+            WHERE sw.ITEMNO = {item_expr}
+        ), 0)
+    """
+    if not through_today:
+        return f"({saldo_expr})"
+    return f"""
+        (
+            {saldo_expr}
+            - COALESCE((
+                SELECT SUM(h.QUANTITY)
+                FROM ITEMHIST h
+                WHERE h.ITEMNO = {item_expr}
+                  AND h.TXDATE > CURRENT_DATE
+            ), 0)
+        )
+    """
+
+
+def _centre_saldo_expr(item_expr="i.ITEMNO", through_today=False):
+    """Return the authoritative SALDO_WHS balance for warehouse CENTRE."""
+    item_expr = item_expr or "i.ITEMNO"
+    saldo_expr = f"""
+        COALESCE((
+            SELECT SUM(sw.QTY)
+            FROM SALDO_WHS sw
+            JOIN WAREHS wh ON wh.WAREHOUSEID = sw.WAREHOUSEID
+            WHERE sw.ITEMNO = {item_expr}
+              AND UPPER(TRIM(wh.NAME)) = 'CENTRE'
+        ), 0)
+    """
+    if not through_today:
+        return f"({saldo_expr})"
+    return f"""
+        (
+            {saldo_expr}
+            - COALESCE((
+                SELECT SUM(h.QUANTITY)
+                FROM ITEMHIST h
+                JOIN WAREHS wh ON wh.WAREHOUSEID = h.WAREHOUSEID
+                WHERE h.ITEMNO = {item_expr}
+                  AND UPPER(TRIM(wh.NAME)) = 'CENTRE'
+                  AND h.TXDATE > CURRENT_DATE
+            ), 0)
+            - COALESCE((
+                SELECT SUM(
+                    CASE
+                        WHEN wt.TOWHID = wh.WAREHOUSEID THEN wd.QUANTITY
+                        WHEN wt.FROMWHID = wh.WAREHOUSEID THEN -wd.QUANTITY
+                        ELSE 0
+                    END
+                )
+                FROM WTRANDET wd
+                JOIN WTRAN wt ON wt.TRANSFERID = wd.TRANSFERID
+                JOIN WAREHS wh ON UPPER(TRIM(wh.NAME)) = 'CENTRE'
+                WHERE wd.ITEMNO = {item_expr}
+                  AND (wt.TOWHID = wh.WAREHOUSEID OR wt.FROMWHID = wh.WAREHOUSEID)
+                  AND wt.TRANSFERDATE > CURRENT_DATE
+            ), 0)
+        )
+    """
+
+
+def _stock_warehouse_rows(cur, item_no):
+    normalized_item_no = str(item_no or "").strip()
+    if not normalized_item_no:
+        return []
+    cur.execute("""
+        SELECT FIRST 1
+            i.ITEMNO,
+            i.ITEMDESCRIPTION,
+            i.ITEMDESCRIPTION2,
+            i.UNIT1
+        FROM ITEM i
+        WHERE UPPER(TRIM(i.ITEMNO)) = UPPER(TRIM(?))
+    """, [normalized_item_no])
+    item = cur.fetchone()
+    if not item:
+        return []
+
+    cur.execute("""
+        SELECT
+            wh.WAREHOUSEID,
+            wh.NAME,
+            COALESCE((
+                SELECT SUM(sw.QTY)
+                FROM SALDO_WHS sw
+                WHERE sw.WAREHOUSEID = wh.WAREHOUSEID
+                  AND UPPER(TRIM(sw.ITEMNO)) = UPPER(TRIM(?))
+            ), 0)
+            - COALESCE((
+                SELECT SUM(h.QUANTITY)
+                FROM ITEMHIST h
+                WHERE h.WAREHOUSEID = wh.WAREHOUSEID
+                  AND UPPER(TRIM(h.ITEMNO)) = UPPER(TRIM(?))
+                  AND h.TXDATE > CURRENT_DATE
+            ), 0)
+            - COALESCE((
+                SELECT SUM(
+                    CASE
+                        WHEN wt.TOWHID = wh.WAREHOUSEID THEN wd.QUANTITY
+                        WHEN wt.FROMWHID = wh.WAREHOUSEID THEN -wd.QUANTITY
+                        ELSE 0
+                    END
+                )
+                FROM WTRANDET wd
+                JOIN WTRAN wt ON wt.TRANSFERID = wd.TRANSFERID
+                WHERE UPPER(TRIM(wd.ITEMNO)) = UPPER(TRIM(?))
+                  AND (wt.TOWHID = wh.WAREHOUSEID OR wt.FROMWHID = wh.WAREHOUSEID)
+                  AND wt.TRANSFERDATE > CURRENT_DATE
+            ), 0) AS QTY
+        FROM WAREHS wh
+        WHERE wh.WAREHOUSEID IS NOT NULL
+        ORDER BY
+            CASE WHEN UPPER(TRIM(wh.NAME)) = 'CENTRE' THEN 0 ELSE 1 END,
+            wh.NAME
+    """, [normalized_item_no, normalized_item_no, normalized_item_no])
+    warehouses = [
+        {
+            "warehouse_id": int(row[0] or 0),
+            "warehouse_name": str(row[1] or "").strip(),
+            "quantity": round(_to_float(row[2]), 4),
+        }
+        for row in cur.fetchall()
+    ]
+    total_quantity = round(sum(row["quantity"] for row in warehouses), 4)
+    nonzero_warehouses = [row for row in warehouses if abs(row["quantity"]) > 0.000001]
+    return {
+        "itemno": str(item[0] or "").strip(),
+        "description": str(item[1] or "").strip(),
+        "description2": str(item[2] or "").strip(),
+        "unit": str(item[3] or "").strip(),
+        "total_quantity": total_quantity,
+        "warehouses": warehouses,
+        "nonzero_warehouses": nonzero_warehouses,
+    }
+
+
 def _stock_code_product_filter_clause(filters, code_product_expr):
     code_values = (filters or {}).get("code_product") or []
     code_tokens = []
@@ -1407,7 +1663,8 @@ def _stock_where_clause(search="", filters=None, code_product_expr="CAST('' AS V
     else:
         conditions.append("i.ITEMNO IS NOT NULL")
     params = []
-    stock_qty_expr = _centre_stock_expr("i.ITEMNO")
+    stock_qty_expr = _easy_stock_expr("i.ITEMNO")
+    stock_centre_expr = _centre_saldo_expr("i.ITEMNO", through_today=True)
 
     if search:
         search_parts = [f"""(
@@ -1419,7 +1676,7 @@ def _stock_where_clause(search="", filters=None, code_product_expr="CAST('' AS V
             OR LOWER(COALESCE(c.NAME, '')) CONTAINING LOWER(?)
             OR CAST(COALESCE(i.MINIMUMQTY, 0) AS VARCHAR(50)) CONTAINING ?
             OR CAST({stock_qty_expr} AS VARCHAR(50)) CONTAINING ?
-            OR (? CONTAINING 'stok' AND COALESCE(i.MINIMUMQTY, 0) > 0 AND {stock_qty_expr} < COALESCE(i.MINIMUMQTY, 0))
+            OR (? CONTAINING 'stok' AND COALESCE(i.MINIMUMQTY, 0) > 0 AND {stock_centre_expr} < COALESCE(i.MINIMUMQTY, 0))
             OR (? CONTAINING 'fifo' AND NOT EXISTS (
                 SELECT 1
                 FROM STANDARBIAYABRGDET sd
@@ -1505,9 +1762,9 @@ def _stock_where_clause(search="", filters=None, code_product_expr="CAST('' AS V
     if note_values:
         note_conditions = []
         if "Stok di bawah minimum" in note_values:
-            note_conditions.append(f"(COALESCE(i.MINIMUMQTY, 0) > 0 AND {stock_qty_expr} < COALESCE(i.MINIMUMQTY, 0))")
+            note_conditions.append(f"(COALESCE(i.MINIMUMQTY, 0) > 0 AND {stock_centre_expr} < COALESCE(i.MINIMUMQTY, 0))")
         if "__EMPTY__" in note_values:
-            note_conditions.append(f"NOT (COALESCE(i.MINIMUMQTY, 0) > 0 AND {stock_qty_expr} < COALESCE(i.MINIMUMQTY, 0))")
+            note_conditions.append(f"NOT (COALESCE(i.MINIMUMQTY, 0) > 0 AND {stock_centre_expr} < COALESCE(i.MINIMUMQTY, 0))")
         if note_conditions:
             conditions.append(f"({' OR '.join(note_conditions)})")
 
@@ -1616,9 +1873,10 @@ def _stock_where_clause(search="", filters=None, code_product_expr="CAST('' AS V
 
 def _stock_order_clause(sort_field="", sort_order="", code_product_expr="CAST('' AS VARCHAR(255))"):
     direction = "DESC" if sort_order == "descend" else "ASC"
-    stock_qty_expr = _centre_stock_expr("i.ITEMNO")
-    stock_system_expr = _centre_stock_expr("i.ITEMNO", through_today=True)
-    stock_note_expr = f"CASE WHEN COALESCE(i.MINIMUMQTY, 0) > 0 AND {stock_qty_expr} < COALESCE(i.MINIMUMQTY, 0) THEN 0 ELSE 1 END"
+    stock_qty_expr = _easy_stock_expr("i.ITEMNO")
+    stock_system_expr = _easy_stock_expr("i.ITEMNO", through_today=True)
+    stock_centre_expr = _centre_saldo_expr("i.ITEMNO", through_today=True)
+    stock_note_expr = f"CASE WHEN COALESCE(i.MINIMUMQTY, 0) > 0 AND {stock_centre_expr} < COALESCE(i.MINIMUMQTY, 0) THEN 0 ELSE 1 END"
     cost_description_expr = """
         CASE
             WHEN EXISTS (
@@ -1642,6 +1900,7 @@ def _stock_order_clause(sort_field="", sort_order="", code_product_expr="CAST(''
         "description2": "i.ITEMDESCRIPTION2",
         "quantity": stock_qty_expr,
         "stock_sistem": stock_system_expr,
+        "stock_centre": stock_centre_expr,
         "minimum_qty": "COALESCE(i.MINIMUMQTY, 0)",
         "stock_note": stock_note_expr,
         "cost_description": cost_description_expr,
@@ -1662,7 +1921,8 @@ def _stock_rows_to_records(rows, cost_description_by_item=None):
         minimum_qty = float(r[6] or 0)
         quantity = float(r[7] or 0)
         stock_sistem = float(r[8] or 0)
-        stock_below_minimum = minimum_qty > 0 and quantity < minimum_qty
+        stock_centre = float(r[9] or 0)
+        stock_below_minimum = minimum_qty > 0 and stock_centre < minimum_qty
         data.append({
             "itemno": item_no,
             "description": str(r[1] or "").strip(),
@@ -1673,9 +1933,10 @@ def _stock_rows_to_records(rows, cost_description_by_item=None):
             "minimum_qty": minimum_qty,
             "quantity": quantity,
             "stock_sistem": stock_sistem,
+            "stock_centre": stock_centre,
             "cost_description": cost_description_by_item.get(item_no, ""),
             "stock_note": "Stok di bawah minimum" if stock_below_minimum else "",
-            "code_product": str(r[9] or "").strip(),
+            "code_product": str(r[10] or "").strip(),
         })
     return data
 
@@ -1684,6 +1945,14 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
     search = str(search or "").strip()
     if not search:
         return [], 0
+    cur.execute("""
+        SELECT FIRST 1 1
+        FROM ITEM i
+        WHERE COALESCE(i.SUSPENDED, 0) = 0
+          AND UPPER(TRIM(i.ITEMNO)) = UPPER(TRIM(?))
+    """, [search])
+    has_exact_itemno = cur.fetchone() is not None
+
     token_values = [
         token for token in "".join(ch if ch.isalnum() else " " for ch in search).split()
         if len(token) >= 2
@@ -1705,21 +1974,30 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
     if code_filter_conditions:
         extra_conditions = " AND " + " AND ".join(code_filter_conditions)
 
-    where_sql = f"""
-        i.ITEMNO IS NOT NULL
-        AND COALESCE(i.SUSPENDED, 0) = 0
-        {extra_conditions}
-        AND (
-            LOWER(i.ITEMNO) CONTAINING LOWER(?)
-            OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
-            OR LOWER(i.ITEMDESCRIPTION2) CONTAINING LOWER(?)
-            OR LOWER({code_product_expr}) CONTAINING LOWER(?)
-            {token_condition}
-        )
-    """
-    params = code_filter_params + [search, search, search, search] + token_params
-    stock_qty_expr = _centre_stock_expr("i.ITEMNO")
-    stock_system_expr = _centre_stock_expr("i.ITEMNO", through_today=True)
+    if has_exact_itemno:
+        where_sql = f"""
+            COALESCE(i.SUSPENDED, 0) = 0
+            {extra_conditions}
+            AND UPPER(TRIM(i.ITEMNO)) = UPPER(TRIM(?))
+        """
+        params = code_filter_params + [search]
+    else:
+        where_sql = f"""
+            i.ITEMNO IS NOT NULL
+            AND COALESCE(i.SUSPENDED, 0) = 0
+            {extra_conditions}
+            AND (
+                LOWER(i.ITEMNO) CONTAINING LOWER(?)
+                OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
+                OR LOWER(i.ITEMDESCRIPTION2) CONTAINING LOWER(?)
+                OR LOWER({code_product_expr}) CONTAINING LOWER(?)
+                {token_condition}
+            )
+        """
+        params = code_filter_params + [search, search, search, search] + token_params
+    stock_qty_expr = _easy_stock_expr("i.ITEMNO")
+    stock_system_expr = _easy_stock_expr("i.ITEMNO", through_today=True)
+    stock_centre_expr = _centre_saldo_expr("i.ITEMNO", through_today=True)
     cur.execute(f"""
         SELECT COUNT(*)
         FROM ITEM i
@@ -1733,6 +2011,7 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
             i.UNIT1, i.TIPEPERSEDIAAN, c.NAME, i.MINIMUMQTY,
             {stock_qty_expr},
             {stock_system_expr},
+            {stock_centre_expr},
             {code_product_expr}
         FROM ITEM i
         LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
@@ -1768,14 +2047,16 @@ def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=Fa
             total = int(cur.fetchone()[0] or 0)
 
         order_sql = _stock_order_clause(sort_field, sort_order, code_product_expr)
-        stock_qty_expr = _centre_stock_expr("i.ITEMNO")
-        stock_system_expr = _centre_stock_expr("i.ITEMNO", through_today=True)
+        stock_qty_expr = _easy_stock_expr("i.ITEMNO")
+        stock_system_expr = _easy_stock_expr("i.ITEMNO", through_today=True)
+        stock_centre_expr = _centre_saldo_expr("i.ITEMNO", through_today=True)
         cur.execute(f"""
             SELECT FIRST ? SKIP ?
                 i.ITEMNO, i.ITEMDESCRIPTION, i.ITEMDESCRIPTION2,
                 i.UNIT1, i.TIPEPERSEDIAAN, c.NAME, i.MINIMUMQTY,
                 {stock_qty_expr},
                 {stock_system_expr},
+                {stock_centre_expr},
                 {code_product_expr}
             FROM ITEM i
             LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
@@ -1876,14 +2157,14 @@ def get_stock_summary(include_standardized=True):
             """)
             standardized_items = int(cur.fetchone()[0] or 0)
 
-        stock_qty_expr = _centre_stock_expr("i.ITEMNO")
+        stock_centre_expr = _centre_saldo_expr("i.ITEMNO", through_today=True)
         cur.execute(f"""
             SELECT COUNT(*)
             FROM ITEM i
             LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
             WHERE {base_where}
               AND COALESCE(i.MINIMUMQTY, 0) > 0
-              AND {stock_qty_expr} < COALESCE(i.MINIMUMQTY, 0)
+              AND {stock_centre_expr} < COALESCE(i.MINIMUMQTY, 0)
         """)
         below_minimum_items = int(cur.fetchone()[0] or 0)
 
@@ -2070,6 +2351,27 @@ def api_stock_filter_options():
     if not check_permission("stock"):
         return jsonify({"message": "Akses ditolak"}), 403
     return jsonify(get_stock_filter_options())
+
+
+@app.route("/api/stock/warehouses")
+@jwt_required()
+def api_stock_warehouses():
+    if not check_permission("stock"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    item_no = request.args.get("itemno", "").strip()
+    if not item_no:
+        return jsonify({"message": "No barang wajib diisi", "data": None}), 400
+    try:
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        data = _stock_warehouse_rows(cur, item_no)
+        con.close()
+        if not data:
+            return jsonify({"message": "Barang tidak ditemukan", "data": None}), 404
+        return jsonify({"data": data})
+    except Exception as e:
+        print(f"Error api_stock_warehouses: {e}")
+        return jsonify({"message": "Gagal memuat stok gudang", "error": str(e), "data": None}), 500
 
 
 @app.route("/api/stock/debug-item")
@@ -2802,6 +3104,141 @@ def api_siinas_valuasi_rinci():
         print(f"Error api_siinas_valuasi_rinci: {e}")
         return jsonify({"data": [], "total": 0, "error": str(e)}), 500
 
+def _row_values(cur, sql, params, defaults):
+    cur.execute(sql, params or [])
+    row = cur.fetchone()
+    if not row:
+        return defaults
+    return [
+        row[i] if i < len(row) and row[i] is not None else defaults[i]
+        for i in range(len(defaults))
+    ]
+
+
+def _dashboard_delivery_history(cur, date_from, date_to):
+    period_filter = "{field} >= ? AND {field} <= ?"
+    delivery_do_count, delivery_do_amount = _row_values(cur, f"""
+        SELECT
+            COUNT(DISTINCT ar.ARINVOICEID),
+            SUM(COALESCE(ar.INVOICEAMOUNT, 0))
+        FROM ARINV ar
+        WHERE ar.DELIVERYORDER IS NOT NULL
+          AND TRIM(CAST(ar.DELIVERYORDER AS VARCHAR(32))) <> ''
+          AND {period_filter.format(field="ar.INVOICEDATE")}
+    """, [date_from, date_to], [0, 0])
+
+    mfsht_cost_expr = "COALESCE(m.ITEMAMOUNT, 0) + COALESCE(m.ACCOUNTAMOUNT, 0)"
+    gr_count, gr_amount = _row_values(cur, f"""
+        SELECT COUNT(*), SUM({mfsht_cost_expr})
+        FROM MFSHT m
+        WHERE {period_filter.format(field="m.SHEETDATE")}
+          AND UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) STARTING WITH 'GR'
+    """, [date_from, date_to], [0, 0])
+    sr_count, sr_amount = _row_values(cur, f"""
+        SELECT COUNT(*), SUM({mfsht_cost_expr})
+        FROM MFSHT m
+        WHERE {period_filter.format(field="m.SHEETDATE")}
+          AND UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) CONTAINING 'SR'
+    """, [date_from, date_to], [0, 0])
+    packing_count, packing_amount = _row_values(cur, f"""
+        SELECT COUNT(*), SUM({mfsht_cost_expr})
+        FROM MFSHT m
+        WHERE {period_filter.format(field="m.SHEETDATE")}
+          AND UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) CONTAINING 'SUPPORT PACKAG'
+    """, [date_from, date_to], [0, 0])
+    pemasangan_count, pemasangan_amount = _row_values(cur, f"""
+        SELECT COUNT(*), SUM({mfsht_cost_expr})
+        FROM MFSHT m
+        WHERE {period_filter.format(field="m.SHEETDATE")}
+          AND UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) CONTAINING 'LTK'
+    """, [date_from, date_to], [0, 0])
+
+    cur.execute(f"""
+        SELECT FIRST 100
+            ar.INVOICENO,
+            ar.INVOICEDATE,
+            ar.PURCHASEORDERNO,
+            pd.NAME,
+            ar.DESCRIPTION
+        FROM ARINV ar
+        LEFT JOIN PERSONDATA pd ON pd.ID = ar.CUSTOMERID
+        WHERE ar.DELIVERYORDER IS NOT NULL
+          AND TRIM(CAST(ar.DELIVERYORDER AS VARCHAR(32))) <> ''
+          AND {period_filter.format(field="ar.INVOICEDATE")}
+        ORDER BY ar.INVOICEDATE DESC, ar.INVOICENO DESC
+    """, [date_from, date_to])
+    delivery_do_rows = [
+        {
+            "no": str(row[0] or "").strip(),
+            "tanggal": str(row[1]) if row[1] else "",
+            "no_po": str(row[2] or "").strip(),
+            "nama": str(row[3] or "").strip(),
+            "deskripsi": str(row[4] or "").strip(),
+        }
+        for row in cur.fetchall()
+    ]
+
+    def mfsht_history_rows(condition_sql):
+        cur.execute(f"""
+            SELECT FIRST 100
+                m.MFNO,
+                m.SHEETDATE,
+                m.DESCRIPTION,
+                m.FINISHED
+            FROM MFSHT m
+            WHERE {period_filter.format(field="m.SHEETDATE")}
+              AND {condition_sql}
+            ORDER BY m.SHEETDATE DESC, m.MFNO DESC
+        """, [date_from, date_to])
+        return [
+            {
+                "no": str(row[0] or "").strip(),
+                "tanggal": str(row[1]) if row[1] else "",
+                "deskripsi": str(row[2] or "").strip(),
+                "status": "Selesai" if int(row[3] or 0) else "Dalam Proses",
+            }
+            for row in cur.fetchall()
+        ]
+
+    return {
+        "date_from": date_from,
+        "date_to": date_to,
+        "do_count": int(delivery_do_count or 0),
+        "do_amount": round(float(delivery_do_amount or 0), 2),
+        "gr_count": int(gr_count or 0),
+        "gr_amount": round(float(gr_amount or 0), 2),
+        "sr_count": int(sr_count or 0),
+        "sr_amount": round(float(sr_amount or 0), 2),
+        "packing_count": int(packing_count or 0),
+        "packing_amount": round(float(packing_amount or 0), 2),
+        "pemasangan_count": int(pemasangan_count or 0),
+        "pemasangan_amount": round(float(pemasangan_amount or 0), 2),
+        "do_rows": delivery_do_rows,
+        "gr_rows": mfsht_history_rows("UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) STARTING WITH 'GR'"),
+        "sr_rows": mfsht_history_rows("UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) CONTAINING 'SR'"),
+        "packing_rows": mfsht_history_rows("UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) CONTAINING 'SUPPORT PACKAG'"),
+        "pemasangan_rows": mfsht_history_rows("UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) CONTAINING 'LTK'"),
+    }
+
+
+@app.route("/api/dashboard-delivery-history")
+@jwt_required()
+def api_dashboard_delivery_history():
+    if not check_permission("dashboard"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    date_from = request.args.get("date_from") or datetime.now().replace(day=1).strftime("%Y-%m-%d")
+    date_to = request.args.get("date_to") or datetime.now().strftime("%Y-%m-%d")
+    try:
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        data = _dashboard_delivery_history(cur, date_from, date_to)
+        con.close()
+        return jsonify(data)
+    except Exception as e:
+        print(f"Error api_dashboard_delivery_history: {e}")
+        return jsonify({"message": "Gagal memuat riwayat barang keluar.", "error": str(e)}), 500
+
+
 @app.route("/api/dashboard-summary")
 @jwt_required()
 def api_dashboard_summary():
@@ -2814,14 +3251,7 @@ def api_dashboard_summary():
         return row[0] if row and row[0] is not None else default
 
     def row_values(cur, sql, params, defaults):
-        cur.execute(sql, params or [])
-        row = cur.fetchone()
-        if not row:
-            return defaults
-        return [
-            row[i] if i < len(row) and row[i] is not None else defaults[i]
-            for i in range(len(defaults))
-        ]
+        return _row_values(cur, sql, params, defaults)
 
     date_from = request.args.get("date_from") or datetime.now().replace(day=1).strftime("%Y-%m-%d")
     date_to = request.args.get("date_to") or datetime.now().strftime("%Y-%m-%d")
@@ -2997,6 +3427,106 @@ def api_dashboard_summary():
               AND {period_filter.format(field="so.SODATE")}
         """, [date_from, date_to])
 
+        delivery_do_count, delivery_do_amount = row_values(cur, f"""
+            SELECT
+                COUNT(DISTINCT ar.ARINVOICEID),
+                SUM(COALESCE(ar.INVOICEAMOUNT, 0))
+            FROM ARINV ar
+            WHERE ar.DELIVERYORDER IS NOT NULL
+              AND TRIM(CAST(ar.DELIVERYORDER AS VARCHAR(32))) <> ''
+              AND {period_filter.format(field="ar.INVOICEDATE")}
+        """, [date_from, date_to], [0, 0])
+
+        mfsht_cost_expr = "COALESCE(m.ITEMAMOUNT, 0) + COALESCE(m.ACCOUNTAMOUNT, 0)"
+
+        gr_count, gr_amount = row_values(cur, f"""
+            SELECT
+                COUNT(*),
+                SUM({mfsht_cost_expr})
+            FROM MFSHT m
+            WHERE {period_filter.format(field="m.SHEETDATE")}
+              AND UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) STARTING WITH 'GR'
+        """, [date_from, date_to], [0, 0])
+
+        sr_count, sr_amount = row_values(cur, f"""
+            SELECT
+                COUNT(*),
+                SUM({mfsht_cost_expr})
+            FROM MFSHT m
+            WHERE {period_filter.format(field="m.SHEETDATE")}
+              AND UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) CONTAINING 'SR'
+        """, [date_from, date_to], [0, 0])
+
+        packing_count, packing_amount = row_values(cur, f"""
+            SELECT
+                COUNT(*),
+                SUM({mfsht_cost_expr})
+            FROM MFSHT m
+            WHERE {period_filter.format(field="m.SHEETDATE")}
+              AND UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) CONTAINING 'SUPPORT PACKAG'
+        """, [date_from, date_to], [0, 0])
+
+        pemasangan_count, pemasangan_amount = row_values(cur, f"""
+            SELECT
+                COUNT(*),
+                SUM({mfsht_cost_expr})
+            FROM MFSHT m
+            WHERE {period_filter.format(field="m.SHEETDATE")}
+              AND UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) CONTAINING 'LTK'
+        """, [date_from, date_to], [0, 0])
+
+        cur.execute(f"""
+            SELECT FIRST 100
+                ar.INVOICENO,
+                ar.INVOICEDATE,
+                ar.PURCHASEORDERNO,
+                pd.NAME,
+                ar.DESCRIPTION
+            FROM ARINV ar
+            LEFT JOIN PERSONDATA pd ON pd.ID = ar.CUSTOMERID
+            WHERE ar.DELIVERYORDER IS NOT NULL
+              AND TRIM(CAST(ar.DELIVERYORDER AS VARCHAR(32))) <> ''
+              AND {period_filter.format(field="ar.INVOICEDATE")}
+            ORDER BY ar.INVOICEDATE DESC, ar.INVOICENO DESC
+        """, [date_from, date_to])
+        delivery_do_rows = [
+            {
+                "no": str(row[0] or "").strip(),
+                "tanggal": str(row[1]) if row[1] else "",
+                "no_po": str(row[2] or "").strip(),
+                "nama": str(row[3] or "").strip(),
+                "deskripsi": str(row[4] or "").strip(),
+            }
+            for row in cur.fetchall()
+        ]
+
+        def mfsht_history_rows(condition_sql):
+            cur.execute(f"""
+                SELECT FIRST 100
+                    m.MFNO,
+                    m.SHEETDATE,
+                    m.DESCRIPTION,
+                    m.FINISHED
+                FROM MFSHT m
+                WHERE {period_filter.format(field="m.SHEETDATE")}
+                  AND {condition_sql}
+                ORDER BY m.SHEETDATE DESC, m.MFNO DESC
+            """, [date_from, date_to])
+            return [
+                {
+                    "no": str(row[0] or "").strip(),
+                    "tanggal": str(row[1]) if row[1] else "",
+                    "deskripsi": str(row[2] or "").strip(),
+                    "status": "Selesai" if int(row[3] or 0) else "Dalam Proses",
+                }
+                for row in cur.fetchall()
+            ]
+
+        gr_rows = mfsht_history_rows("UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) STARTING WITH 'GR'")
+        sr_rows = mfsht_history_rows("UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) CONTAINING 'SR'")
+        packing_rows = mfsht_history_rows("UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) CONTAINING 'SUPPORT PACKAG'")
+        pemasangan_rows = mfsht_history_rows("UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) CONTAINING 'LTK'")
+
         sales_amount_period = one(cur, f"""
             SELECT SUM({sales_amount_expr})
             FROM SO so
@@ -3164,6 +3694,49 @@ def api_dashboard_summary():
             ) x
         """, [month_from, month_from, month_to])
         so_frequency_row = cur.fetchone() or [0, 0, 0]
+
+        monthly_so_invoice_from = """
+            FROM SO so
+            JOIN ARINVDET do_det ON do_det.SOID = so.SOID
+            JOIN ARINV do_doc ON do_doc.ARINVOICEID = do_det.ARINVOICEID
+            JOIN ARINV inv ON inv.CUSTOMERID = do_doc.CUSTOMERID
+              AND inv.PURCHASEORDERNO = do_doc.PURCHASEORDERNO
+              AND inv.GETFROMDO = 1
+              AND inv.INVOICETYPE = 1
+              AND (inv.ISDP IS NULL OR inv.ISDP = 0)
+            WHERE do_doc.DELIVERYORDER IS NOT NULL
+              AND TRIM(CAST(do_doc.DELIVERYORDER AS VARCHAR(32))) <> ''
+              AND so.SODATE >= CAST(? AS DATE)
+              AND so.SODATE <= CAST(? AS DATE)
+        """
+        monthly_invoiced_so, monthly_paid_so = row_values(cur, f"""
+            SELECT
+                COUNT(DISTINCT so.SOID),
+                COUNT(DISTINCT CASE
+                    WHEN COALESCE(inv.PAIDAMOUNT, 0) > 0 THEN so.SOID
+                END)
+            {monthly_so_invoice_from}
+        """, [month_from, month_to], [0, 0])
+        (
+            monthly_invoice_count,
+            monthly_invoiced_amount,
+            monthly_paid_amount,
+            monthly_paid_invoice_count,
+        ) = row_values(cur, f"""
+            SELECT
+                COUNT(*),
+                SUM(x.INVOICEAMOUNT),
+                SUM(x.PAIDAMOUNT),
+                SUM(CASE WHEN x.PAIDAMOUNT > 0 THEN 1 ELSE 0 END)
+            FROM (
+                SELECT
+                    inv.ARINVOICEID,
+                    MAX(COALESCE(inv.INVOICEAMOUNT, 0)) AS INVOICEAMOUNT,
+                    MAX(COALESCE(inv.PAIDAMOUNT, 0)) AS PAIDAMOUNT
+                {monthly_so_invoice_from}
+                GROUP BY inv.ARINVOICEID
+            ) x
+        """, [month_from, month_to], [0, 0, 0, 0])
 
         on_time_do, linked_do = row_values(cur, f"""
             SELECT
@@ -3439,8 +4012,14 @@ def api_dashboard_summary():
             """)
             marketing_map = {}
             customer_lookup = {}
+            customer_target_map = get_salesman_targets(comparison_year)
             for customer_id, customer_no, customer_name, salesman_id, salesman_name in cur.fetchall():
                 salesman_key = str(salesman_id if salesman_id is not None else "none")
+                target_data = customer_target_map.get(int(salesman_id or 0), {}) if salesman_id is not None else {}
+                monthly_targets = {
+                    month: float((target_data.get("targets") or {}).get(month, 0) or 0)
+                    for month in range(1, 13)
+                }
                 marketing = marketing_map.setdefault(salesman_key, {
                     "id": salesman_key,
                     "name": str(salesman_name or "Tanpa Salesman").strip() or "Tanpa Salesman",
@@ -3450,6 +4029,9 @@ def api_dashboard_summary():
                     "current_to": current_to.isoformat(),
                     "previous_from": previous_year_from.isoformat(),
                     "previous_to": previous_year_to.isoformat(),
+                    "targets": monthly_targets,
+                    "target_ytd": sum(monthly_targets.get(month, 0) for month in range(1, current_to.month + 1)),
+                    "target_year_total": sum(monthly_targets.values()),
                     "customers": {},
                 })
                 customer_key = int(customer_id or 0)
@@ -3466,6 +4048,43 @@ def api_dashboard_summary():
                 }
                 marketing["customers"][customer_key] = customer
                 customer_lookup[customer_key] = customer
+
+            for target_item in customer_target_map.values():
+                target_id = str(target_item.get("salesman_id") or "")
+                if not target_id or target_id in marketing_map or target_id not in active_salesman_names:
+                    continue
+                monthly_targets = {
+                    month: float((target_item.get("targets") or {}).get(month, 0) or 0)
+                    for month in range(1, 13)
+                }
+                marketing_map[target_id] = {
+                    "id": target_id,
+                    "name": active_salesman_names[target_id],
+                    "year": comparison_year,
+                    "previous_year": previous_year,
+                    "current_from": current_ytd_from.isoformat(),
+                    "current_to": current_to.isoformat(),
+                    "previous_from": previous_year_from.isoformat(),
+                    "previous_to": previous_year_to.isoformat(),
+                    "targets": monthly_targets,
+                    "target_ytd": sum(monthly_targets.get(month, 0) for month in range(1, current_to.month + 1)),
+                    "target_year_total": sum(monthly_targets.values()),
+                    "customers": {},
+                }
+
+            cur.execute("""
+                SELECT
+                    pd.SALESMANID,
+                    COUNT(*)
+                FROM PERSONDATA pd
+                WHERE pd.PERSONTYPE = 0
+                  AND COALESCE(pd.SUSPENDED, 0) <> 0
+                GROUP BY pd.SALESMANID
+            """)
+            inactive_customer_count_map = {
+                str(salesman_id if salesman_id is not None else "none"): int(customer_count or 0)
+                for salesman_id, customer_count in cur.fetchall()
+            }
 
             def apply_customer_sales_period(period_key, period_start, period_end):
                 cur.execute(f"""
@@ -3501,9 +4120,15 @@ def api_dashboard_summary():
                 progress_count = 0
                 zero_with_previous_count = 0
                 new_sales_count = 0
+                previous_order_customer_count = 0
+                current_order_customer_count = 0
                 for customer in marketing["customers"].values():
                     previous_amount = float(customer.get("previous_amount") or 0)
                     current_amount = float(customer.get("current_amount") or 0)
+                    if int(customer.get("previous_so_count") or 0) > 0:
+                        previous_order_customer_count += 1
+                    if int(customer.get("current_so_count") or 0) > 0:
+                        current_order_customer_count += 1
                     diff_amount = current_amount - previous_amount
                     diff_pct = round((diff_amount / previous_amount * 100), 1) if previous_amount else (100 if current_amount > 0 else 0)
                     achievement_pct = round((current_amount / previous_amount * 100), 1) if previous_amount else (100 if current_amount > 0 else 0)
@@ -3532,6 +4157,8 @@ def api_dashboard_summary():
                     customers.append(customer)
 
                 total_diff = total_current - total_previous
+                target_ytd = float(marketing.get("target_ytd") or 0)
+                target_gap = total_current - target_ytd
                 marketing_customer_yearly.append({
                     "id": marketing["id"],
                     "name": marketing["name"],
@@ -3541,7 +4168,17 @@ def api_dashboard_summary():
                     "current_to": marketing["current_to"],
                     "previous_from": marketing["previous_from"],
                     "previous_to": marketing["previous_to"],
+                    "targets": marketing.get("targets") or {},
+                    "target_ytd": target_ytd,
+                    "target_year_total": float(marketing.get("target_year_total") or 0),
+                    "target_achievement_pct": round((total_current / target_ytd * 100), 1) if target_ytd else (100 if total_current > 0 else 0),
+                    "target_gap_amount": target_gap,
                     "customer_count": len(customers),
+                    "active_customer_count": len(customers),
+                    "inactive_customer_count": inactive_customer_count_map.get(marketing["id"], 0),
+                    "previous_order_customer_count": previous_order_customer_count,
+                    "current_order_customer_count": current_order_customer_count,
+                    "current_no_order_customer_count": len(customers) - current_order_customer_count,
                     "previous_amount": total_previous,
                     "current_amount": total_current,
                     "diff_amount": total_diff,
@@ -4129,6 +4766,23 @@ def api_dashboard_summary():
                 "avg_per_so_direction": "up" if avg_per_so_change_pct >= 0 else "down",
                 "pending_delivery_so": int(so_status_row[5] or 0),
                 "on_time_delivery_pct": on_time_delivery_pct,
+                "delivery_history": {
+                    "do_count": int(delivery_do_count or 0),
+                    "do_amount": round(float(delivery_do_amount or 0), 2),
+                    "gr_count": int(gr_count or 0),
+                    "gr_amount": round(float(gr_amount or 0), 2),
+                    "sr_count": int(sr_count or 0),
+                    "sr_amount": round(float(sr_amount or 0), 2),
+                    "packing_count": int(packing_count or 0),
+                    "packing_amount": round(float(packing_amount or 0), 2),
+                    "pemasangan_count": int(pemasangan_count or 0),
+                    "pemasangan_amount": round(float(pemasangan_amount or 0), 2),
+                    "do_rows": delivery_do_rows,
+                    "gr_rows": gr_rows,
+                    "sr_rows": sr_rows,
+                    "packing_rows": packing_rows,
+                    "pemasangan_rows": pemasangan_rows,
+                },
                 "so_status": {
                     "total": int(so_status_row[0] or 0),
                     "open": int(so_status_row[1] or 0),
@@ -4147,6 +4801,12 @@ def api_dashboard_summary():
                     "active_customers": int(so_frequency_row[0] or 0),
                     "repeat_customers": int(so_frequency_row[1] or 0),
                     "new_customers": int(so_frequency_row[2] or 0),
+                    "invoiced_so": int(monthly_invoiced_so or 0),
+                    "invoice_count": int(monthly_invoice_count or 0),
+                    "invoiced_amount": float(monthly_invoiced_amount or 0),
+                    "paid_so": int(monthly_paid_so or 0),
+                    "paid_invoice_count": int(monthly_paid_invoice_count or 0),
+                    "paid_amount": float(monthly_paid_amount or 0),
                 },
                 "top_products": top_products,
                 "top_qty_product": top_qty_product,
@@ -4200,6 +4860,365 @@ def api_dashboard_summary():
 
 
 # ─── RIWAYAT ─────────────────────────────────────────────────────────────────
+PART_NUMBER_UNCATEGORIZED = "Belum Ada Category"
+
+
+def _part_number_category_expr():
+    return f"COALESCE(NULLIF(TRIM(i.RESERVED9), ''), '{PART_NUMBER_UNCATEGORIZED}')"
+
+
+@app.route("/api/part-number-history/categories")
+@jwt_required()
+def api_part_number_history_categories():
+    if not check_permission("stock"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        search = str(request.args.get("search", "") or "").strip()
+        category_expr = _part_number_category_expr()
+        params = []
+        search_sql = ""
+        if search:
+            search_sql = f"""AND (
+                LOWER({category_expr}) CONTAINING LOWER(?)
+                OR LOWER(d.ITEMNO) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(i.ITEMDESCRIPTION, '')) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(pd.NAME, '')) CONTAINING LOWER(?)
+            )"""
+            params = [search, search, search, search]
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute(f"""
+            SELECT {category_expr}, COUNT(DISTINCT d.ITEMNO),
+                   COUNT(DISTINCT so.CUSTOMERID), COUNT(DISTINCT so.SOID),
+                   MAX(so.SODATE)
+            FROM SO so
+            JOIN SODET d ON d.SOID = so.SOID
+            JOIN ITEM i ON i.ITEMNO = d.ITEMNO
+            LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+            WHERE UPPER(TRIM(COALESCE(so.SONO, ''))) STARTING WITH 'AI-PP-'
+              {search_sql}
+            GROUP BY {category_expr}
+            ORDER BY {category_expr}
+        """, params)
+        rows = cur.fetchall()
+        cur.execute(f"""
+            SELECT
+                COUNT(DISTINCT {category_expr}),
+                COUNT(DISTINCT d.ITEMNO),
+                COUNT(DISTINCT so.CUSTOMERID),
+                COUNT(DISTINCT so.SOID),
+                COUNT(DISTINCT CASE
+                    WHEN {category_expr} = '{PART_NUMBER_UNCATEGORIZED}' THEN d.ITEMNO
+                END),
+                MAX(so.SODATE)
+            FROM SO so
+            JOIN SODET d ON d.SOID = so.SOID
+            JOIN ITEM i ON i.ITEMNO = d.ITEMNO
+            LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+            WHERE UPPER(TRIM(COALESCE(so.SONO, ''))) STARTING WITH 'AI-PP-'
+              {search_sql}
+        """, params)
+        summary_row = cur.fetchone() or [0, 0, 0, 0, 0, None]
+        con.close()
+        data = [{
+            "category": str(row[0] or PART_NUMBER_UNCATEGORIZED).strip(),
+            "item_count": int(row[1] or 0),
+            "customer_count": int(row[2] or 0),
+            "order_count": int(row[3] or 0),
+            "last_order_date": str(row[4]) if row[4] else "",
+        } for row in rows]
+        data.sort(key=lambda row: (
+            row["category"] == PART_NUMBER_UNCATEGORIZED,
+            row["category"],
+        ))
+        return jsonify({
+            "data": data,
+            "summary": {
+                "category_count": int(summary_row[0] or 0),
+                "item_count": int(summary_row[1] or 0),
+                "customer_count": int(summary_row[2] or 0),
+                "order_count": int(summary_row[3] or 0),
+                "uncategorized_item_count": int(summary_row[4] or 0),
+                "last_order_date": str(summary_row[5]) if summary_row[5] else "",
+            },
+        })
+    except Exception as e:
+        print(f"Error api_part_number_history_categories: {e}")
+        return jsonify({"data": [], "error": str(e)}), 500
+
+
+@app.route("/api/part-number-history")
+@jwt_required()
+def api_part_number_history():
+    if not check_permission("stock"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        category = str(request.args.get("category", "") or "").strip()
+        search = str(request.args.get("search", "") or "").strip()
+        grouped = str(request.args.get("grouped", "") or "").strip().lower() in ("1", "true", "yes")
+        offset = max(int(request.args.get("offset", 0)), 0)
+        limit = min(max(int(request.args.get("limit", 50)), 1), 200)
+        category_expr = _part_number_category_expr()
+        conditions = ["UPPER(TRIM(COALESCE(so.SONO, ''))) STARTING WITH 'AI-PP-'"]
+        params = []
+        if category:
+            conditions.append(f"{category_expr} = ?")
+            params.append(category)
+        if search:
+            conditions.append("""(
+                LOWER(d.ITEMNO) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(i.ITEMDESCRIPTION, '')) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(pd.PERSONNO, '')) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(pd.NAME, '')) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(so.SONO, '')) CONTAINING LOWER(?)
+            )""")
+            params += [search, search, search, search, search]
+        where_sql = " AND ".join(conditions)
+        grouped_fields = f"{category_expr}, d.ITEMNO, i.ITEMDESCRIPTION, pd.PERSONNO, pd.NAME"
+        grouped_fields_aliased = f"""
+            {category_expr} AS CATEGORY_NAME,
+            d.ITEMNO AS ITEM_NO,
+            i.ITEMDESCRIPTION AS ITEM_DESCRIPTION,
+            pd.PERSONNO AS CUSTOMER_NO,
+            pd.NAME AS CUSTOMER_NAME
+        """
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        if grouped:
+            cur.execute(f"""
+                SELECT COUNT(*) FROM (
+                    SELECT d.ITEMNO
+                    FROM SO so
+                    JOIN SODET d ON d.SOID = so.SOID
+                    JOIN ITEM i ON i.ITEMNO = d.ITEMNO
+                    JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+                    WHERE {where_sql}
+                    GROUP BY d.ITEMNO
+                ) grouped_items
+            """, params)
+            total = int((cur.fetchone() or [0])[0] or 0)
+            cur.execute(f"""
+                SELECT FIRST ? SKIP ? d.ITEMNO, MAX(so.SODATE)
+                FROM SO so
+                JOIN SODET d ON d.SOID = so.SOID
+                JOIN ITEM i ON i.ITEMNO = d.ITEMNO
+                JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+                WHERE {where_sql}
+                GROUP BY d.ITEMNO
+                ORDER BY MAX(so.SODATE) DESC, d.ITEMNO
+            """, [limit, offset] + params)
+            page_item_numbers = [str(row[0] or "").strip() for row in cur.fetchall()]
+            if page_item_numbers:
+                item_placeholders = ", ".join(["?"] * len(page_item_numbers))
+                cur.execute(f"""
+                    SELECT {grouped_fields},
+                           COUNT(DISTINCT so.SOID), MIN(so.SODATE), MAX(so.SODATE),
+                           LIST(DISTINCT so.SONO, ', ')
+                    FROM SO so
+                    JOIN SODET d ON d.SOID = so.SOID
+                    JOIN ITEM i ON i.ITEMNO = d.ITEMNO
+                    JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+                    WHERE {where_sql}
+                      AND d.ITEMNO IN ({item_placeholders})
+                    GROUP BY {grouped_fields}
+                    ORDER BY MAX(so.SODATE) DESC, d.ITEMNO, pd.NAME
+                """, params + page_item_numbers)
+                rows = cur.fetchall()
+            else:
+                rows = []
+        else:
+            cur.execute(f"""
+                SELECT COUNT(*) FROM (
+                    SELECT {grouped_fields_aliased}
+                    FROM SO so
+                    JOIN SODET d ON d.SOID = so.SOID
+                    JOIN ITEM i ON i.ITEMNO = d.ITEMNO
+                    JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+                    WHERE {where_sql}
+                    GROUP BY {grouped_fields}
+                ) grouped_history
+            """, params)
+            total = int((cur.fetchone() or [0])[0] or 0)
+            cur.execute(f"""
+                SELECT FIRST ? SKIP ? {grouped_fields},
+                       COUNT(DISTINCT so.SOID), MIN(so.SODATE), MAX(so.SODATE),
+                       LIST(DISTINCT so.SONO, ', ')
+                FROM SO so
+                JOIN SODET d ON d.SOID = so.SOID
+                JOIN ITEM i ON i.ITEMNO = d.ITEMNO
+                JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+                WHERE {where_sql}
+                GROUP BY {grouped_fields}
+                ORDER BY MAX(so.SODATE) DESC, d.ITEMNO, pd.NAME
+            """, [limit, offset] + params)
+            rows = cur.fetchall()
+        cur.execute(f"""
+            SELECT d.ITEMNO, pd.PERSONNO, COUNT(DISTINCT so.SOID)
+            FROM SO so
+            JOIN SODET d ON d.SOID = so.SOID
+            JOIN ITEM i ON i.ITEMNO = d.ITEMNO
+            JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+            WHERE {where_sql}
+            GROUP BY d.ITEMNO, pd.PERSONNO
+        """, params)
+        summary_relations = cur.fetchall()
+        cur.execute(f"""
+            SELECT COUNT(DISTINCT d.ITEMNO), COUNT(DISTINCT so.CUSTOMERID),
+                   COUNT(DISTINCT so.SOID), MAX(so.SODATE)
+            FROM SO so
+            JOIN SODET d ON d.SOID = so.SOID
+            JOIN ITEM i ON i.ITEMNO = d.ITEMNO
+            JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+            WHERE {where_sql}
+        """, params)
+        summary_row = cur.fetchone() or [0, 0, 0, None]
+        con.close()
+        keys = [(str(row[1] or "").strip(), str(row[3] or "").strip()) for row in rows]
+        manual_map = get_customer_part_numbers(keys)
+        data = []
+        for row in rows:
+            item_no = str(row[1] or "").strip()
+            customer_no = str(row[3] or "").strip()
+            manual = manual_map.get((item_no, customer_no), {})
+            data.append({
+                "category": str(row[0] or PART_NUMBER_UNCATEGORIZED).strip(),
+                "item_no": item_no,
+                "description": str(row[2] or "").strip(),
+                "customer_no": customer_no,
+                "customer_name": str(row[4] or "").strip(),
+                "order_count": int(row[5] or 0),
+                "first_order_date": str(row[6]) if row[6] else "",
+                "last_order_date": str(row[7]) if row[7] else "",
+                "so_numbers": str(row[8] or "").strip(),
+                "customer_part_number": manual.get("part_number", ""),
+                "customer_pn_updated_by": manual.get("updated_by", ""),
+                "customer_pn_updated_at": manual.get("updated_at", ""),
+            })
+        all_relation_keys = [
+            (str(row[0] or "").strip(), str(row[1] or "").strip())
+            for row in summary_relations
+        ]
+        all_manual_map = get_customer_part_numbers(all_relation_keys)
+        return jsonify({
+            "data": data,
+            "total": total,
+            "summary": {
+                "item_count": int(summary_row[0] or 0),
+                "customer_count": int(summary_row[1] or 0),
+                "order_count": int(summary_row[2] or 0),
+                "relation_count": len(summary_relations),
+                "repeat_relation_count": sum(
+                    1 for row in summary_relations if int(row[2] or 0) > 1
+                ),
+                "customer_pn_count": sum(
+                    1 for value in all_manual_map.values()
+                    if str(value.get("part_number") or "").strip()
+                ),
+                "last_order_date": str(summary_row[3]) if summary_row[3] else "",
+            },
+        })
+    except Exception as e:
+        print(f"Error api_part_number_history: {e}")
+        return jsonify({"data": [], "total": 0, "error": str(e)}), 500
+
+
+@app.route("/api/part-number-history/vendors")
+@jwt_required()
+def api_part_number_history_vendors():
+    if not check_permission("stock"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        item_no = str(request.args.get("item_no", "") or "").strip()
+        if not item_no:
+            return jsonify({"data": []})
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT pd.PERSONNO, pd.NAME, COUNT(DISTINCT po.POID),
+                   MIN(po.PODATE), MAX(po.PODATE), LIST(DISTINCT po.PONO, ', ')
+            FROM PO po
+            JOIN PODET d ON d.POID = po.POID
+            JOIN PERSONDATA pd ON pd.ID = po.VENDORID
+            WHERE d.ITEMNO = ?
+            GROUP BY pd.PERSONNO, pd.NAME
+            ORDER BY MAX(po.PODATE) DESC, pd.NAME
+        """, [item_no])
+        rows = cur.fetchall()
+        con.close()
+        keys = [(item_no, str(row[0] or "").strip()) for row in rows]
+        manual_map = get_vendor_part_numbers(keys)
+        data = []
+        for row in rows:
+            vendor_no = str(row[0] or "").strip()
+            manual = manual_map.get((item_no, vendor_no), {})
+            data.append({
+                "item_no": item_no,
+                "vendor_no": vendor_no,
+                "vendor_name": str(row[1] or "").strip(),
+                "purchase_count": int(row[2] or 0),
+                "first_purchase_date": str(row[3]) if row[3] else "",
+                "last_purchase_date": str(row[4]) if row[4] else "",
+                "po_numbers": str(row[5] or "").strip(),
+                "vendor_part_number": manual.get("part_number", ""),
+                "vendor_pn_updated_by": manual.get("updated_by", ""),
+                "vendor_pn_updated_at": manual.get("updated_at", ""),
+            })
+        return jsonify({"data": data})
+    except Exception as e:
+        print(f"Error api_part_number_history_vendors: {e}")
+        return jsonify({"data": [], "error": str(e)}), 500
+
+
+@app.route("/api/part-number-history/part-number", methods=["POST"])
+@jwt_required()
+def api_part_number_history_save():
+    if not check_permission("stock"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        payload = request.get_json(silent=True) or {}
+        kind = str(payload.get("kind") or "").strip().lower()
+        item_no = str(payload.get("item_no") or "").strip()
+        party_no = str(payload.get("party_no") or "").strip()
+        part_number = str(payload.get("part_number") or "").strip()
+        if kind not in ("customer", "vendor") or not item_no or not party_no:
+            return jsonify({"message": "Jenis, barang, atau relasi tidak valid."}), 400
+        if len(part_number) > 150:
+            return jsonify({"message": "Part number maksimal 150 karakter."}), 400
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        if kind == "customer":
+            cur.execute("""
+                SELECT FIRST 1 so.SOID
+                FROM SO so
+                JOIN SODET d ON d.SOID = so.SOID
+                JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+                WHERE d.ITEMNO = ? AND pd.PERSONNO = ?
+                  AND UPPER(TRIM(COALESCE(so.SONO, ''))) STARTING WITH 'AI-PP-'
+            """, [item_no, party_no])
+        else:
+            cur.execute("""
+                SELECT FIRST 1 po.POID
+                FROM PO po
+                JOIN PODET d ON d.POID = po.POID
+                JOIN PERSONDATA pd ON pd.ID = po.VENDORID
+                WHERE d.ITEMNO = ? AND pd.PERSONNO = ?
+            """, [item_no, party_no])
+        exists = cur.fetchone()
+        con.close()
+        if not exists:
+            return jsonify({"message": "Riwayat transaksi barang dan relasi tidak ditemukan."}), 404
+        user = get_current_user()
+        saved = save_part_number(kind, item_no, party_no, part_number, user.get("username"))
+        audit_current_user(
+            "part_number_history_update", "stock",
+            f"Update PN {kind} {item_no} / {party_no}", saved,
+        )
+        return jsonify({"message": "Part number disimpan.", "data": saved})
+    except Exception as e:
+        print(f"Error api_part_number_history_save: {e}")
+        return jsonify({"message": "Gagal menyimpan part number.", "error": str(e)}), 500
+
+
 @app.route("/api/dashboard-product-transactions")
 @jwt_required()
 def api_dashboard_product_transactions():
@@ -4930,6 +5949,10 @@ def api_riwayat_export():
 
 max_itemid_at_start = 0
 
+
+def get_item_source_key():
+    return f"{DB_CONFIG['host']}:{DB_CONFIG['port']}|{DB_CONFIG['database']}".lower()
+
 def init_baseline():
     global max_itemid_at_start
     try:
@@ -4938,9 +5961,23 @@ def init_baseline():
         cur.execute("SELECT MAX(ITEMID) FROM ITEM")
         row = cur.fetchone()
         max_easy = int(row[0] or 0)
+        source_key = get_item_source_key()
+        max_logged = get_max_logged_itemid(source_key)
+        if max_logged:
+            max_itemid_at_start = min(max_easy, max_logged)
+        else:
+            logged_itemnos = get_logged_itemnos()
+            matching_ids = []
+            for index in range(0, len(logged_itemnos), 500):
+                chunk = logged_itemnos[index:index + 500]
+                placeholders = ", ".join(["?"] * len(chunk))
+                cur.execute(
+                    f"SELECT MAX(ITEMID) FROM ITEM WHERE ITEMNO IN ({placeholders})",
+                    chunk,
+                )
+                matching_ids.append(int((cur.fetchone() or [0])[0] or 0))
+            max_itemid_at_start = max(matching_ids, default=max_easy) or max_easy
         con.close()
-        max_logged = get_max_logged_itemid()
-        max_itemid_at_start = max(max_easy, max_logged)
         print(f"Baseline ITEMID: {max_itemid_at_start}")
     except Exception as e:
         print(f"Error init_baseline: {e}")
@@ -4958,14 +5995,18 @@ def check_new_items():
         con.close()
         for row in rows:
             item_id = int(row[0] or 0)
+            itemno = str(row[1] or "").strip()
+            max_itemid_at_start = max(max_itemid_at_start, item_id)
+            if is_excluded_barang_baru(itemno):
+                continue
             item = {
-                "itemid": item_id, "itemno": str(row[1] or "").strip(),
+                "source_key": get_item_source_key(),
+                "itemid": item_id, "itemno": itemno,
                 "description": str(row[2] or "").strip(), "description2": str(row[3] or "").strip(),
                 "unit": str(row[4] or "").strip(), "type": str(row[5] or "").strip(),
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
             save_barang_baru(item)
-            max_itemid_at_start = max(max_itemid_at_start, item_id)
             print(f"Barang baru: {row[1]}")
     except Exception as e:
         print(f"Error check_new_items: {e}")
@@ -4991,6 +6032,32 @@ def api_barang_baru():
 # Tabel: REQUISITION + REQUISITIONDET + ITEM
 # Status: Menunggu / Sudah Dipesan / Sudah Diterima
 
+def _purchase_request_aging(expected_date):
+    if not expected_date:
+        return None
+    return (expected_date - datetime.now().date()).days
+
+
+def _purchase_request_dt_status(aging):
+    if aging is None:
+        return ""
+    if aging < 0:
+        return "LATE"
+    if aging == 0:
+        return "DT Hari Ini"
+    if aging == 1:
+        return "DT Besok"
+    return "On Proses"
+
+
+def _purchase_request_status(no_po, qty_received):
+    if float(qty_received or 0) > 0:
+        return "Diterima"
+    if str(no_po or "").strip():
+        return "Diproses"
+    return "Menunggu"
+
+
 @app.route("/api/permintaan")
 @jwt_required()
 def api_permintaan():
@@ -5001,13 +6068,18 @@ def api_permintaan():
         date_from = request.args.get("date_from", "")
         date_to   = request.args.get("date_to", "")
         status    = request.args.get("status", "")  # menunggu / dipesan / diterima
+        vendor_filter = request.args.get("vendor", "").strip()
         offset    = int(request.args.get("offset", 0))
         limit     = int(request.args.get("limit", 50))
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
 
-        conditions   = ["1=1"]
+        conditions = ["""EXISTS (
+            SELECT 1 FROM USERS creator
+            WHERE creator.USERID = r.USERID
+              AND UPPER(TRIM(creator.USERNAME)) = 'ALIKA'
+        )"""]
         params_where = []
 
         if search:
@@ -5016,8 +6088,11 @@ def api_permintaan():
                 OR LOWER(r.DESCRIPTION) CONTAINING LOWER(?)
                 OR LOWER(rd.ITEMNO)    CONTAINING LOWER(?)
                 OR LOWER(rd.ITEMOVDESC) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(rd.ITEMRESERVED9, '')) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(po.PONO, '')) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(vendor.NAME, '')) CONTAINING LOWER(?)
             )""")
-            params_where += [search, search, search, search]
+            params_where += [search, search, search, search, search, search, search]
 
         if date_from:
             conditions.append("r.REQDATE >= ?")
@@ -5027,13 +6102,17 @@ def api_permintaan():
             conditions.append("r.REQDATE <= ?")
             params_where.append(date_to)
 
+        if vendor_filter:
+            conditions.append("UPPER(TRIM(COALESCE(vendor.NAME, ''))) = UPPER(TRIM(?))")
+            params_where.append(vendor_filter)
+
         # Filter status
         if status == "menunggu":
-            conditions.append("rd.QTYORDERED = 0 AND rd.QTYRECEIVED = 0 AND rd.CLOSED = 0")
-        elif status == "dipesan":
-            conditions.append("rd.QTYORDERED > 0 AND rd.QTYRECEIVED = 0")
+            conditions.append("po.PONO IS NULL AND COALESCE(rd.QTYRECEIVED, 0) = 0")
+        elif status in ("dipesan", "diproses"):
+            conditions.append("po.PONO IS NOT NULL AND COALESCE(rd.QTYRECEIVED, 0) = 0")
         elif status == "diterima":
-            conditions.append("rd.QTYRECEIVED > 0")
+            conditions.append("COALESCE(rd.QTYRECEIVED, 0) > 0")
 
         where_sql = " AND ".join(conditions)
 
@@ -5051,12 +6130,20 @@ def api_permintaan():
                 rd.CLOSED,
                 i.ITEMDESCRIPTION,
                 i.UNIT1,
-                po.PONO
+                po.PONO,
+                rd.ITEMRESERVED9,
+                po.PODATE,
+                po.EXPECTED,
+                vendor.NAME,
+                pd.QUANTITY,
+                r.REQID,
+                rd.SEQ
             FROM REQUISITION r
             LEFT JOIN REQUISITIONDET rd  ON rd.REQID   = r.REQID
             LEFT JOIN ITEM i             ON i.ITEMNO   = rd.ITEMNO
             LEFT JOIN PODET pd           ON pd.REQID   = r.REQID AND pd.REQSEQ = rd.SEQ
             LEFT JOIN PO po              ON po.POID    = pd.POID
+            LEFT JOIN PERSONDATA vendor  ON vendor.ID  = po.VENDORID
             WHERE {where_sql}
               AND rd.ITEMNO IS NOT NULL
             ORDER BY r.REQDATE DESC, r.REQNO, rd.SEQ
@@ -5065,26 +6152,17 @@ def api_permintaan():
         rows = cur.fetchall()
         con.close()
 
-        def get_status(qty_ordered, qty_received, closed):
-            if closed:
-                return "Selesai"
-            if qty_received and float(qty_received) > 0:
-                return "Sudah Diterima"
-            if qty_ordered and float(qty_ordered) > 0:
-                return "Sudah Dipesan"
-            return "Menunggu"
-
         def get_status_color(status):
             return {
-                "Sudah Diterima": "success",
-                "Sudah Dipesan":  "processing",
-                "Menunggu":       "warning",
-                "Selesai":        "default",
+                "Diterima": "success",
+                "Diproses": "processing",
+                "Menunggu": "warning",
             }.get(status, "default")
 
         data = []
         for row in rows:
-            st = get_status(row[7], row[8], row[9])
+            st = _purchase_request_status(row[12], row[8])
+            aging = _purchase_request_aging(row[15])
             data.append({
                 "no_permintaan":    str(row[0] or "").strip(),
                 "tgl_permintaan":   str(row[1]) if row[1] else "",
@@ -5097,15 +6175,79 @@ def api_permintaan():
                 "qty_received":     float(row[8] or 0),
                 "unit":             str(row[11] or "").strip(),
                 "no_po":            str(row[12] or "").strip(),
+                "no_so":            str(row[13] or "").strip(),
+                "tgl_pesanan_po":   str(row[14]) if row[14] else "",
+                "estimasi_po":      str(row[15]) if row[15] else "",
+                "vendor":           str(row[16] or "").strip(),
+                "qty_po":           float(row[17] or 0),
+                "aging":            aging,
+                "status_dt_po":     _purchase_request_dt_status(aging),
+                "row_key":          f"{int(row[18])}:{int(row[19])}",
                 "status":           st,
                 "status_color":     get_status_color(st),
             })
+
+        remark_map = get_purchase_request_remarks([row["row_key"] for row in data])
+        for row in data:
+            remark = remark_map.get(row["row_key"], {})
+            row["remark"] = remark.get("remark", "")
+            row["remark_updated_by"] = remark.get("updated_by", "")
+            row["remark_updated_at"] = remark.get("updated_at", "")
 
         return jsonify({"data": filter_record_columns("permintaan", data), "total": len(data)})
 
     except Exception as e:
         print(f"Error api_permintaan: {e}")
         return jsonify({"data": [], "total": 0, "error": str(e)})
+
+
+@app.route("/api/permintaan/remark", methods=["POST"])
+@jwt_required()
+def api_permintaan_remark_save():
+    if not check_permission("permintaan"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        payload = request.get_json(silent=True) or {}
+        row_key = str(payload.get("row_key") or "").strip()
+        remark = str(payload.get("remark") or "").strip()
+        if not re.fullmatch(r"\d+:\d+", row_key):
+            return jsonify({"message": "Identitas baris permintaan tidak valid."}), 400
+        if len(remark) > 500:
+            return jsonify({"message": "Remark maksimal 500 karakter."}), 400
+
+        reqid, reqseq = [int(value) for value in row_key.split(":", 1)]
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT FIRST 1 r.REQNO
+            FROM REQUISITION r
+            JOIN REQUISITIONDET rd ON rd.REQID = r.REQID
+            WHERE r.REQID = ? AND rd.SEQ = ?
+              AND EXISTS (
+                  SELECT 1 FROM USERS creator
+                  WHERE creator.USERID = r.USERID
+                    AND UPPER(TRIM(creator.USERNAME)) = 'ALIKA'
+              )
+        """, [reqid, reqseq])
+        valid_row = cur.fetchone()
+        con.close()
+        if not valid_row:
+            return jsonify({"message": "Baris permintaan tidak ditemukan."}), 404
+
+        user = get_current_user()
+        saved = save_purchase_request_remark(
+            row_key, remark, user.get("username")
+        )
+        audit_current_user(
+            "purchase_request_remark_update",
+            "permintaan",
+            f"Update remark {str(valid_row[0] or '').strip()} baris {reqseq}",
+            saved,
+        )
+        return jsonify({"message": "Remark disimpan.", "data": saved})
+    except Exception as e:
+        print(f"Error api_permintaan_remark_save: {e}")
+        return jsonify({"message": "Gagal menyimpan remark.", "error": str(e)}), 500
 
 
 @app.route("/api/liw-pur-mkt/note", methods=["POST"])
@@ -5271,11 +6413,19 @@ def api_permintaan_summary():
         search    = request.args.get("search", "")
         date_from = request.args.get("date_from", "")
         date_to   = request.args.get("date_to", "")
+        vendor_filter = request.args.get("vendor", "").strip()
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
 
-        conditions   = ["rd.ITEMNO IS NOT NULL"]
+        conditions = [
+            "rd.ITEMNO IS NOT NULL",
+            """EXISTS (
+                SELECT 1 FROM USERS creator
+                WHERE creator.USERID = r.USERID
+                  AND UPPER(TRIM(creator.USERNAME)) = 'ALIKA'
+            )""",
+        ]
         params_where = []
 
         if search:
@@ -5284,8 +6434,11 @@ def api_permintaan_summary():
                 OR LOWER(r.DESCRIPTION) CONTAINING LOWER(?)
                 OR LOWER(rd.ITEMNO)    CONTAINING LOWER(?)
                 OR LOWER(rd.ITEMOVDESC) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(rd.ITEMRESERVED9, '')) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(po.PONO, '')) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(vendor.NAME, '')) CONTAINING LOWER(?)
             )""")
-            params_where += [search, search, search, search]
+            params_where += [search, search, search, search, search, search, search]
 
         if date_from:
             conditions.append("r.REQDATE >= ?")
@@ -5295,15 +6448,25 @@ def api_permintaan_summary():
             conditions.append("r.REQDATE <= ?")
             params_where.append(date_to)
 
+        if vendor_filter:
+            conditions.append("UPPER(TRIM(COALESCE(vendor.NAME, ''))) = UPPER(TRIM(?))")
+            params_where.append(vendor_filter)
+
         where_sql = " AND ".join(conditions)
         cur.execute(f"""
             SELECT
                 COUNT(*),
-                SUM(CASE WHEN COALESCE(rd.QTYORDERED, 0) = 0 AND COALESCE(rd.QTYRECEIVED, 0) = 0 AND COALESCE(rd.CLOSED, 0) = 0 THEN 1 ELSE 0 END),
-                SUM(CASE WHEN COALESCE(rd.QTYORDERED, 0) > 0 AND COALESCE(rd.QTYRECEIVED, 0) = 0 THEN 1 ELSE 0 END),
-                SUM(CASE WHEN COALESCE(rd.QTYRECEIVED, 0) > 0 THEN 1 ELSE 0 END)
+                SUM(CASE WHEN po.PONO IS NULL AND COALESCE(rd.QTYRECEIVED, 0) = 0 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN po.PONO IS NOT NULL AND COALESCE(rd.QTYRECEIVED, 0) = 0 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN COALESCE(rd.QTYRECEIVED, 0) > 0 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN po.EXPECTED = DATEADD(1 DAY TO CURRENT_DATE) THEN 1 ELSE 0 END),
+                SUM(CASE WHEN po.EXPECTED < CURRENT_DATE THEN 1 ELSE 0 END),
+                SUM(CASE WHEN po.EXPECTED > DATEADD(1 DAY TO CURRENT_DATE) THEN 1 ELSE 0 END)
             FROM REQUISITION r
             LEFT JOIN REQUISITIONDET rd ON rd.REQID = r.REQID
+            LEFT JOIN PODET pd ON pd.REQID = r.REQID AND pd.REQSEQ = rd.SEQ
+            LEFT JOIN PO po ON po.POID = pd.POID
+            LEFT JOIN PERSONDATA vendor ON vendor.ID = po.VENDORID
             WHERE {where_sql}
         """, params_where)
         row = cur.fetchone()
@@ -5314,11 +6477,63 @@ def api_permintaan_summary():
             "menunggu": int(row[1] or 0),
             "dipesan": int(row[2] or 0),
             "diterima": int(row[3] or 0),
+            "dt_besok": int(row[4] or 0),
+            "late": int(row[5] or 0),
+            "on_proses": int(row[6] or 0),
         })
 
     except Exception as e:
         print(f"Error api_permintaan_summary: {e}")
-        return jsonify({"total": 0, "menunggu": 0, "dipesan": 0, "diterima": 0, "error": str(e)})
+        return jsonify({
+            "total": 0, "menunggu": 0, "dipesan": 0, "diterima": 0,
+            "dt_besok": 0, "late": 0, "on_proses": 0, "error": str(e),
+        })
+
+
+@app.route("/api/permintaan/vendor-options")
+@jwt_required()
+def api_permintaan_vendor_options():
+    if not check_permission("permintaan"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        date_from = request.args.get("date_from", "")
+        date_to = request.args.get("date_to", "")
+        conditions = [
+            "rd.ITEMNO IS NOT NULL",
+            "vendor.NAME IS NOT NULL",
+            "TRIM(vendor.NAME) <> ''",
+            """EXISTS (
+                SELECT 1 FROM USERS creator
+                WHERE creator.USERID = r.USERID
+                  AND UPPER(TRIM(creator.USERNAME)) = 'ALIKA'
+            )""",
+        ]
+        params = []
+        if date_from:
+            conditions.append("r.REQDATE >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("r.REQDATE <= ?")
+            params.append(date_to)
+
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute(f"""
+            SELECT DISTINCT TRIM(vendor.NAME)
+            FROM REQUISITION r
+            JOIN REQUISITIONDET rd ON rd.REQID = r.REQID
+            LEFT JOIN PODET pd ON pd.REQID = r.REQID AND pd.REQSEQ = rd.SEQ
+            LEFT JOIN PO po ON po.POID = pd.POID
+            LEFT JOIN PERSONDATA vendor ON vendor.ID = po.VENDORID
+            WHERE {" AND ".join(conditions)}
+            ORDER BY 1
+        """, params)
+        vendors = [str(row[0] or "").strip() for row in cur.fetchall()]
+        con.close()
+        return jsonify({"data": vendors})
+    except Exception as e:
+        print(f"Error api_permintaan_vendor_options: {e}")
+        return jsonify({"data": [], "error": str(e)}), 500
 
 
 @app.route("/api/permintaan/export")
@@ -5331,11 +6546,19 @@ def api_permintaan_export():
         date_from = request.args.get("date_from", "")
         date_to   = request.args.get("date_to", "")
         status    = request.args.get("status", "")
+        vendor_filter = request.args.get("vendor", "").strip()
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
 
-        conditions   = ["rd.ITEMNO IS NOT NULL"]
+        conditions = [
+            "rd.ITEMNO IS NOT NULL",
+            """EXISTS (
+                SELECT 1 FROM USERS creator
+                WHERE creator.USERID = r.USERID
+                  AND UPPER(TRIM(creator.USERNAME)) = 'ALIKA'
+            )""",
+        ]
         params_where = []
 
         if search:
@@ -5344,8 +6567,11 @@ def api_permintaan_export():
                 OR LOWER(r.DESCRIPTION) CONTAINING LOWER(?)
                 OR LOWER(rd.ITEMNO)    CONTAINING LOWER(?)
                 OR LOWER(rd.ITEMOVDESC) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(rd.ITEMRESERVED9, '')) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(po.PONO, '')) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(vendor.NAME, '')) CONTAINING LOWER(?)
             )""")
-            params_where += [search, search, search, search]
+            params_where += [search, search, search, search, search, search, search]
 
         if date_from:
             conditions.append("r.REQDATE >= ?")
@@ -5355,12 +6581,16 @@ def api_permintaan_export():
             conditions.append("r.REQDATE <= ?")
             params_where.append(date_to)
 
+        if vendor_filter:
+            conditions.append("UPPER(TRIM(COALESCE(vendor.NAME, ''))) = UPPER(TRIM(?))")
+            params_where.append(vendor_filter)
+
         if status == "menunggu":
-            conditions.append("rd.QTYORDERED = 0 AND rd.QTYRECEIVED = 0 AND rd.CLOSED = 0")
-        elif status == "dipesan":
-            conditions.append("rd.QTYORDERED > 0 AND rd.QTYRECEIVED = 0")
+            conditions.append("po.PONO IS NULL AND COALESCE(rd.QTYRECEIVED, 0) = 0")
+        elif status in ("dipesan", "diproses"):
+            conditions.append("po.PONO IS NOT NULL AND COALESCE(rd.QTYRECEIVED, 0) = 0")
         elif status == "diterima":
-            conditions.append("rd.QTYRECEIVED > 0")
+            conditions.append("COALESCE(rd.QTYRECEIVED, 0) > 0")
 
         where_sql = " AND ".join(conditions)
         cur.execute(f"""
@@ -5377,12 +6607,20 @@ def api_permintaan_export():
                 rd.CLOSED,
                 i.ITEMDESCRIPTION,
                 i.UNIT1,
-                po.PONO
+                po.PONO,
+                rd.ITEMRESERVED9,
+                po.PODATE,
+                po.EXPECTED,
+                vendor.NAME,
+                pd.QUANTITY,
+                r.REQID,
+                rd.SEQ
             FROM REQUISITION r
             LEFT JOIN REQUISITIONDET rd  ON rd.REQID   = r.REQID
             LEFT JOIN ITEM i             ON i.ITEMNO   = rd.ITEMNO
             LEFT JOIN PODET pd           ON pd.REQID   = r.REQID AND pd.REQSEQ = rd.SEQ
             LEFT JOIN PO po              ON po.POID    = pd.POID
+            LEFT JOIN PERSONDATA vendor  ON vendor.ID  = po.VENDORID
             WHERE {where_sql}
             ORDER BY r.REQDATE DESC, r.REQNO, rd.SEQ
         """, params_where)
@@ -5391,14 +6629,8 @@ def api_permintaan_export():
 
         data = []
         for row in rows:
-            if row[9]:
-                st = "Selesai"
-            elif row[8] and float(row[8]) > 0:
-                st = "Sudah Diterima"
-            elif row[7] and float(row[7]) > 0:
-                st = "Sudah Dipesan"
-            else:
-                st = "Menunggu"
+            st = _purchase_request_status(row[12], row[8])
+            aging = _purchase_request_aging(row[15])
             data.append({
                 "no_permintaan":    str(row[0] or "").strip(),
                 "tgl_permintaan":   str(row[1]) if row[1] else "",
@@ -5411,8 +6643,23 @@ def api_permintaan_export():
                 "qty_received":     float(row[8] or 0),
                 "unit":             str(row[11] or "").strip(),
                 "no_po":            str(row[12] or "").strip(),
+                "no_so":            str(row[13] or "").strip(),
+                "tgl_pesanan_po":   str(row[14]) if row[14] else "",
+                "estimasi_po":      str(row[15]) if row[15] else "",
+                "vendor":           str(row[16] or "").strip(),
+                "qty_po":           float(row[17] or 0),
+                "aging":            aging,
+                "status_dt_po":     _purchase_request_dt_status(aging),
+                "row_key":          f"{int(row[18])}:{int(row[19])}",
                 "status":           st,
             })
+
+        remark_map = get_purchase_request_remarks([row["row_key"] for row in data])
+        for row in data:
+            remark = remark_map.get(row["row_key"], {})
+            row["remark"] = remark.get("remark", "")
+            row["remark_updated_by"] = remark.get("updated_by", "")
+            row["remark_updated_at"] = remark.get("updated_at", "")
 
         return jsonify({"data": filter_record_columns("permintaan", data), "total_rows": len(data)})
 
@@ -7012,7 +8259,7 @@ def api_dashboard_sales_daily_report():
 @jwt_required()
 def api_penjualan_flow_summary():
     """Ringkasan alur penjualan: jumlah dokumen SO, status SO, dan DO."""
-    if not check_permission("penjualan"):
+    if not (check_permission("penjualan") or check_permission("penjualan_do")):
         return jsonify({"message": "Akses ditolak"}), 403
     try:
         date_from = request.args.get("date_from", "")
@@ -7323,6 +8570,463 @@ def api_penjualan_so():
     except Exception as e:
         print(f"Error api_penjualan_so: {e}")
         return jsonify({"data": [], "total_rows": 0, "total_so": 0, "error": str(e)})
+
+
+
+@app.route("/api/integration/purchases")
+def api_integration_purchases():
+    """Read-only Purchase Order feed untuk backend Driver App."""
+    authorization = str(request.headers.get("Authorization", "") or "")
+    provided_key = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+
+    if not DRIVER_INTEGRATION_API_KEY:
+        return jsonify({"message": "Integration API belum dikonfigurasi"}), 503
+    if not provided_key or not hmac.compare_digest(provided_key, DRIVER_INTEGRATION_API_KEY):
+        return jsonify({"message": "Integration API key tidak valid"}), 401
+
+    try:
+        search = request.args.get("search", "")
+        date_from = request.args.get("date_from", "")
+        date_to = request.args.get("date_to", "")
+        offset = max(int(request.args.get("offset", 0)), 0)
+        limit = min(max(int(request.args.get("limit", 50)), 1), 5000)
+
+        conditions = ["1=1"]
+        params_where = []
+        if search:
+            conditions.append("""(
+                LOWER(po.PONO) CONTAINING LOWER(?)
+                OR LOWER(pd.NAME) CONTAINING LOWER(?)
+                OR LOWER(det.ITEMNO) CONTAINING LOWER(?)
+                OR LOWER(det.ITEMOVDESC) CONTAINING LOWER(?)
+                OR LOWER(rq.REQNO) CONTAINING LOWER(?)
+            )""")
+            params_where += [search, search, search, search, search]
+        if date_from:
+            conditions.append("po.PODATE >= ?")
+            params_where.append(date_from)
+        if date_to:
+            conditions.append("po.PODATE <= ?")
+            params_where.append(date_to)
+        where_sql = " AND ".join(conditions)
+
+        con = fdb.connect(**DB_CONFIG)
+        try:
+            cur = con.cursor()
+            cur.execute(f"""
+                SELECT FIRST ? SKIP ?
+                    po.POID,
+                    po.PONO,
+                    po.PODATE,
+                    po.EXPECTED,
+                    pd.PERSONNO,
+                    pd.NAME,
+                    po.DESCRIPTION,
+                    det.SEQ,
+                    det.ITEMNO,
+                    det.ITEMOVDESC,
+                    det.QUANTITY,
+                    det.ITEMUNIT,
+                    rq.REQNO,
+                    rq.REQDATE
+                FROM PO po
+                LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
+                LEFT JOIN PODET det ON det.POID = po.POID
+                LEFT JOIN REQUISITION rq ON rq.REQID = det.REQID
+                WHERE {where_sql}
+                ORDER BY po.PODATE DESC, po.PONO, det.SEQ
+            """, [limit, offset] + params_where)
+            rows = cur.fetchall()
+
+            cur.execute(f"""
+                SELECT COUNT(*), COUNT(DISTINCT po.POID)
+                FROM PO po
+                LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
+                LEFT JOIN PODET det ON det.POID = po.POID
+                LEFT JOIN REQUISITION rq ON rq.REQID = det.REQID
+                WHERE {where_sql}
+            """, params_where)
+            count_row = cur.fetchone()
+        finally:
+            con.close()
+
+        data = []
+        for row in rows:
+            data.append({
+                "_source_purchase_id": int(row[0] or 0),
+                "_source_line_seq": int(row[7] or 0),
+                "no_pembelian": str(row[1] or "").strip(),
+                "tgl_pembelian": str(row[2]) if row[2] else "",
+                "tgl_ekspetasi": str(row[3]) if row[3] else "",
+                "no_pemasok": str(row[4] or "").strip(),
+                "nama_pemasok": str(row[5] or "").strip(),
+                "deskripsi": str(row[6] or "").strip(),
+                "no_barang": str(row[8] or "").strip(),
+                "deskripsi_barang": str(row[9] or "").strip(),
+                "qty": float(row[10] or 0),
+                "uom": str(row[11] or "").strip(),
+                "no_permintaan": str(row[12] or "").strip(),
+                "tgl_permintaan": str(row[13]) if row[13] else "",
+            })
+        return jsonify({
+            "data": data,
+            "total_rows": int(count_row[0] or 0),
+            "total_po": int(count_row[1] or 0),
+        })
+    except Exception as e:
+        print(f"Error api_integration_purchases: {e}")
+        return jsonify({"data": [], "total_rows": 0, "total_po": 0, "error": str(e)}), 500
+
+@app.route("/api/integration/sales-orders")
+def api_integration_sales_orders():
+    """Read-only Sales Order feed untuk backend Driver App."""
+    authorization = str(request.headers.get("Authorization", "") or "")
+    provided_key = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+
+    if not DRIVER_INTEGRATION_API_KEY:
+        return jsonify({"message": "Integration API belum dikonfigurasi"}), 503
+    if not provided_key or not hmac.compare_digest(provided_key, DRIVER_INTEGRATION_API_KEY):
+        return jsonify({"message": "Integration API key tidak valid"}), 401
+
+    try:
+        search = request.args.get("search", "")
+        date_from = request.args.get("date_from", "")
+        date_to = request.args.get("date_to", "")
+        status = request.args.get("status", "")
+        offset = max(int(request.args.get("offset", 0)), 0)
+        limit = min(max(int(request.args.get("limit", 50)), 1), 5000)
+
+        con = fdb.connect(**DB_CONFIG)
+        try:
+            cur = con.cursor()
+            line_closed_expr = _so_line_closed_expr(cur)
+            where_sql, params_where = _so_where_clause(
+                search, date_from, date_to, status, line_closed_expr
+            )
+            so_select = _so_select_sql(line_closed_expr)
+            cur.execute(f"""
+                SELECT FIRST ? SKIP ?
+                    {so_select},
+                    det.SEQ AS INTEGRATION_LINE_SEQ
+                {_SO_FROM}
+                WHERE {where_sql}
+                ORDER BY so.SODATE DESC, so.SONO, det.SEQ
+            """, [limit, offset] + params_where)
+            rows = cur.fetchall()
+
+            cur.execute(f"""
+                SELECT COUNT(*), COUNT(DISTINCT so.SOID)
+                {_SO_FROM}
+                WHERE {where_sql}
+            """, params_where)
+            count_row = cur.fetchone()
+            delivery_map = _get_so_delivery_map(cur, rows)
+        finally:
+            con.close()
+
+        data = _build_so_rows(rows, delivery_map)
+        for record, row in zip(data, rows):
+            record["_source_so_id"] = int(row[27] or 0)
+            record["_source_line_seq"] = int(row[29] or 0)
+        return jsonify({
+            "data": data,
+            "total_rows": int(count_row[0] or 0),
+            "total_so": int(count_row[1] or 0),
+            "total_amount": sum(row.get("amount", 0) for row in data),
+        })
+    except Exception as e:
+        print(f"Error api_integration_sales_orders: {e}")
+        return jsonify({
+            "data": [], "total_rows": 0, "total_so": 0, "error": str(e)
+        }), 500
+
+
+SALES_DOCUMENT_TYPES = [
+    {"key": "do_origin", "label": "DO Origin", "department": "LOG"},
+    {"key": "csms", "label": "CSMS", "department": "QC"},
+    {"key": "coo", "label": "COO", "department": "QC"},
+    {"key": "com", "label": "COM", "department": "QC"},
+    {"key": "coc", "label": "COC", "department": "MKT"},
+    {"key": "warranty", "label": "Warranty", "department": "MKT"},
+    {"key": "bast", "label": "BAST", "department": "MKT"},
+    {"key": "po", "label": "PO", "department": "MKT"},
+    {"key": "faktur_pajak", "label": "Faktur Pajak", "department": "ACC"},
+    {"key": "invoice", "label": "Invoice", "department": "ACC"},
+]
+SALES_DOCUMENT_KEYS = {item["key"] for item in SALES_DOCUMENT_TYPES}
+
+
+def _sales_document_status(documents):
+    required_count = sum(1 for doc in documents.values() if doc["required"])
+    completed_count = sum(
+        1 for doc in documents.values()
+        if doc["required"] and doc["completed"]
+    )
+    if required_count == 0:
+        status = "unconfigured"
+    elif completed_count == required_count:
+        status = "complete"
+    else:
+        status = "incomplete"
+    return {
+        "status": status,
+        "required_count": required_count,
+        "completed_count": completed_count,
+        "progress_pct": round(completed_count / required_count * 100) if required_count else 0,
+    }
+
+
+@app.route("/api/sales-document-completeness")
+@jwt_required()
+def api_sales_document_completeness():
+    if not check_permission("penjualan_so"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        search = str(request.args.get("search", "") or "").strip()
+        date_from = str(request.args.get("date_from", "") or "").strip()
+        date_to = str(request.args.get("date_to", "") or "").strip()
+        status_filter = str(request.args.get("status", "") or "").strip().lower()
+        offset = max(int(request.args.get("offset", 0)), 0)
+        limit = min(max(int(request.args.get("limit", 50)), 1), 200)
+
+        conditions = ["UPPER(TRIM(COALESCE(so.SONO, ''))) STARTING WITH 'AI-PP-'"]
+        params = []
+        if search:
+            conditions.append("""(
+                LOWER(so.SONO) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(pd.NAME, '')) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(so.PONO, '')) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, '')) CONTAINING LOWER(?)
+            )""")
+            params += [search, search, search, search]
+        if date_from:
+            conditions.append("so.SODATE >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("so.SODATE <= ?")
+            params.append(date_to)
+
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute(f"""
+            SELECT
+                so.SONO,
+                so.SODATE,
+                COALESCE(pd.PERSONNO, ''),
+                COALESCE(pd.NAME, ''),
+                COALESCE(so.PONO, ''),
+                COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, '')
+            FROM SO so
+            LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+            LEFT JOIN SALESMAN sm ON sm.SALESMANID = so.SALESMANID
+            WHERE {" AND ".join(conditions)}
+            ORDER BY so.SODATE DESC, so.SONO DESC
+        """, params)
+        source_rows = cur.fetchall()
+        con.close()
+
+        checklist_map = get_sales_document_checklists([row[0] for row in source_rows])
+        all_data = []
+        for row in source_rows:
+            so_no = str(row[0] or "").strip()
+            saved_documents = checklist_map.get(so_no, {})
+            documents = {}
+            for document in SALES_DOCUMENT_TYPES:
+                saved = saved_documents.get(document["key"], {})
+                documents[document["key"]] = {
+                    **document,
+                    "required": bool(saved.get("required", False)),
+                    "completed": bool(saved.get("completed", False)),
+                    "updated_by": saved.get("updated_by", ""),
+                    "updated_at": saved.get("updated_at", ""),
+                    "validated_by": saved.get("validated_by", ""),
+                    "validated_at": saved.get("validated_at", ""),
+                    "is_custom": False,
+                }
+            custom_documents = []
+            for document_key, saved in saved_documents.items():
+                if not saved.get("is_custom"):
+                    continue
+                custom_document = {
+                    "key": document_key,
+                    "label": saved.get("label") or "Dokumen Tambahan",
+                    "department": saved.get("department") or "LAINNYA",
+                    "required": bool(saved.get("required", True)),
+                    "completed": bool(saved.get("completed", False)),
+                    "updated_by": saved.get("updated_by", ""),
+                    "updated_at": saved.get("updated_at", ""),
+                    "validated_by": saved.get("validated_by", ""),
+                    "validated_at": saved.get("validated_at", ""),
+                    "is_custom": True,
+                }
+                documents[document_key] = custom_document
+                custom_documents.append(custom_document)
+            progress = _sales_document_status(documents)
+            item = {
+                "so_no": so_no,
+                "tgl_so": str(row[1]) if row[1] else "",
+                "no_pelanggan": str(row[2] or "").strip(),
+                "nama_pelanggan": str(row[3] or "").strip(),
+                "no_po_customer": str(row[4] or "").strip(),
+                "salesman": str(row[5] or "").strip(),
+                "documents": documents,
+                "custom_documents": custom_documents,
+                **progress,
+            }
+            all_data.append(item)
+
+        summary = {
+            "total": len(all_data),
+            "complete": sum(1 for row in all_data if row["status"] == "complete"),
+            "incomplete": sum(1 for row in all_data if row["status"] == "incomplete"),
+            "unconfigured": sum(1 for row in all_data if row["status"] == "unconfigured"),
+        }
+        data = [
+            row for row in all_data
+            if not status_filter or row["status"] == status_filter
+        ]
+        return jsonify({
+            "data": data[offset:offset + limit],
+            "total": len(data),
+            "summary": summary,
+            "document_types": SALES_DOCUMENT_TYPES,
+        })
+    except Exception as e:
+        print(f"Error api_sales_document_completeness: {e}")
+        return jsonify({"data": [], "total": 0, "error": str(e)}), 500
+
+
+@app.route("/api/sales-document-completeness/checklist", methods=["POST"])
+@jwt_required()
+def api_sales_document_completeness_save():
+    if not check_permission("penjualan_so"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    user = get_current_user()
+    if user.get("role") not in ("admin", "marketing"):
+        return jsonify({"message": "Checklist hanya dapat dikelola oleh MKT."}), 403
+    try:
+        payload = request.get_json(silent=True) or {}
+        so_no = str(payload.get("so_no") or "").strip()
+        document_key = str(payload.get("document_key") or "").strip().lower()
+        saved_documents = get_sales_document_checklists([so_no]).get(so_no, {})
+        is_saved_custom = bool(saved_documents.get(document_key, {}).get("is_custom"))
+        if not so_no or (document_key not in SALES_DOCUMENT_KEYS and not is_saved_custom):
+            return jsonify({"message": "SO atau jenis dokumen tidak valid."}), 400
+
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT FIRST 1 so.SONO
+            FROM SO so
+            WHERE UPPER(TRIM(so.SONO)) = UPPER(TRIM(?))
+              AND UPPER(TRIM(so.SONO)) STARTING WITH 'AI-PP-'
+        """, [so_no])
+        valid_so = cur.fetchone()
+        con.close()
+        if not valid_so:
+            return jsonify({"message": "Sales Order tidak ditemukan di Easy Accounting."}), 404
+
+        saved = save_sales_document_checklist(
+            so_no=so_no,
+            document_key=document_key,
+            is_required=bool(payload.get("required")),
+            is_completed=bool(payload.get("completed")),
+            updated_by=user.get("username"),
+            document_label=saved_documents.get(document_key, {}).get("label", ""),
+            department=saved_documents.get(document_key, {}).get("department", ""),
+            is_custom=is_saved_custom,
+        )
+        audit_current_user(
+            "sales_document_checklist_update",
+            "penjualan_so",
+            f"Update kelengkapan dokumen {so_no} / {document_key}",
+            saved,
+        )
+        return jsonify({"message": "Checklist dokumen disimpan.", "data": saved})
+    except Exception as e:
+        print(f"Error api_sales_document_completeness_save: {e}")
+        return jsonify({"message": "Gagal menyimpan checklist.", "error": str(e)}), 500
+
+
+@app.route("/api/sales-document-completeness/custom-document", methods=["POST"])
+@jwt_required()
+def api_sales_custom_document_create():
+    if not check_permission("penjualan_so"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    user = get_current_user()
+    if user.get("role") not in ("admin", "marketing"):
+        return jsonify({"message": "Dokumen tambahan hanya dapat dibuat oleh MKT."}), 403
+    try:
+        payload = request.get_json(silent=True) or {}
+        so_no = str(payload.get("so_no") or "").strip()
+        label = str(payload.get("label") or "").strip()
+        department = str(payload.get("department") or "").strip().upper()
+        if not so_no or not label or not department:
+            return jsonify({"message": "SO, nama dokumen, dan departemen wajib diisi."}), 400
+        if len(label) > 100 or len(department) > 20:
+            return jsonify({"message": "Nama dokumen atau departemen terlalu panjang."}), 400
+
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT FIRST 1 so.SONO
+            FROM SO so
+            WHERE UPPER(TRIM(so.SONO)) = UPPER(TRIM(?))
+              AND UPPER(TRIM(so.SONO)) STARTING WITH 'AI-PP-'
+        """, [so_no])
+        valid_so = cur.fetchone()
+        con.close()
+        if not valid_so:
+            return jsonify({"message": "Sales Order tidak ditemukan di Easy Accounting."}), 404
+
+        document_key = f"custom_{uuid.uuid4().hex}"
+        saved = save_sales_document_checklist(
+            so_no=so_no,
+            document_key=document_key,
+            is_required=True,
+            is_completed=False,
+            updated_by=user.get("username"),
+            document_label=label,
+            department=department,
+            is_custom=True,
+        )
+        audit_current_user(
+            "sales_custom_document_create",
+            "penjualan_so",
+            f"Tambah dokumen {label} untuk {so_no}",
+            saved,
+        )
+        return jsonify({"message": "Dokumen tambahan dibuat.", "data": saved})
+    except Exception as e:
+        print(f"Error api_sales_custom_document_create: {e}")
+        return jsonify({"message": "Gagal membuat dokumen tambahan.", "error": str(e)}), 500
+
+
+@app.route("/api/sales-document-completeness/custom-document", methods=["DELETE"])
+@jwt_required()
+def api_sales_custom_document_delete():
+    if not check_permission("penjualan_so"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    user = get_current_user()
+    if user.get("role") not in ("admin", "marketing"):
+        return jsonify({"message": "Dokumen tambahan hanya dapat dihapus oleh MKT."}), 403
+    try:
+        payload = request.get_json(silent=True) or {}
+        so_no = str(payload.get("so_no") or "").strip()
+        document_key = str(payload.get("document_key") or "").strip().lower()
+        deleted = delete_sales_custom_document(so_no, document_key)
+        if not deleted:
+            return jsonify({"message": "Dokumen tambahan tidak ditemukan."}), 404
+        audit_current_user(
+            "sales_custom_document_delete",
+            "penjualan_so",
+            f"Hapus dokumen tambahan {so_no} / {document_key}",
+            {"so_no": so_no, "document_key": document_key},
+        )
+        return jsonify({"message": "Dokumen tambahan dihapus."})
+    except Exception as e:
+        print(f"Error api_sales_custom_document_delete: {e}")
+        return jsonify({"message": "Gagal menghapus dokumen tambahan.", "error": str(e)}), 500
 
 
 @app.route("/api/penjualan-so/debug-status")
@@ -10218,6 +11922,7 @@ def _profit_loss_allocate_lines(source_lines, target_amount, target_hpp):
 
 
 def _profit_loss_delivery_map(cur, no_sos):
+    delivery_purchase_item_no = "6.00.00.006"
     normalized_no_sos = sorted({
         str(no_so or "").strip().upper()
         for no_so in no_sos
@@ -10235,6 +11940,10 @@ def _profit_loss_delivery_map(cur, no_sos):
             SELECT
                 UPPER(TRIM(det.ITEMRESERVED10)),
                 po.PONO,
+                po.PODATE,
+                pd.NAME,
+                det.ITEMNO,
+                COALESCE(NULLIF(TRIM(det.ITEMOVDESC), ''), i.ITEMDESCRIPTION),
                 det.QUANTITY,
                 det.UNITPRICE,
                 {line_discpc},
@@ -10253,21 +11962,129 @@ def _profit_loss_delivery_map(cur, no_sos):
                 )
             FROM PO po
             JOIN PODET det ON det.POID = po.POID
+            LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
+            LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
             WHERE UPPER(TRIM(COALESCE(po.PONO, ''))) STARTING WITH 'AI-SRV'
               AND UPPER(TRIM(COALESCE(det.ITEMRESERVED10, ''))) IN ({placeholders})
-        """, chunk)
+              AND UPPER(TRIM(COALESCE(det.ITEMNO, ''))) = ?
+        """, chunk + [delivery_purchase_item_no])
         for row in cur.fetchall():
             no_so = str(row[0] or "").strip().upper()
-            amounts = _purchase_amounts(row[2], row[3], row[4], row[7], row[5], row[6])
-            entry = result.setdefault(no_so, {"amount": 0.0, "po_numbers": []})
+            amounts = _purchase_amounts(row[6], row[7], row[8], row[11], row[9], row[10])
+            entry = result.setdefault(no_so, {"amount": 0.0, "po_numbers": [], "details": []})
             entry["amount"] += amounts["dpp"]
             no_delivery = str(row[1] or "").strip()
             if no_delivery and no_delivery not in entry["po_numbers"]:
                 entry["po_numbers"].append(no_delivery)
+            entry["details"].append({
+                "no_transaksi": no_delivery,
+                "tanggal": str(row[2]) if row[2] else "",
+                "nama_vendor": str(row[3] or "").strip(),
+                "no_barang": str(row[4] or "").strip(),
+                "deskripsi_barang": str(row[5] or "").strip(),
+                "qty": round(_to_float(row[6]), 4),
+                "harga": round(_to_float(row[7]), 2),
+                "nilai_dpp": round(_to_float(amounts.get("dpp")), 2),
+                "source_type": "item",
+            })
+
+        cur.execute(f"""
+            SELECT
+                UPPER(TRIM(COALESCE(
+                    NULLIF(TRIM(det.ITEMRESERVED10), ''),
+                    NULLIF(TRIM(det.ITEMRESERVED9), ''),
+                    NULLIF(TRIM(rd.ITEMRESERVED9), '')
+                ))),
+                po.PONO,
+                po.PODATE,
+                pd.NAME,
+                MAX(rq.REQNO),
+                COALESCE(po.FREIGHT, 0),
+                (
+                    SELECT COUNT(DISTINCT UPPER(TRIM(COALESCE(
+                        NULLIF(TRIM(det_ref.ITEMRESERVED10), ''),
+                        NULLIF(TRIM(det_ref.ITEMRESERVED9), ''),
+                        NULLIF(TRIM(rd_ref.ITEMRESERVED9), '')
+                    ))))
+                    FROM PODET det_ref
+                    LEFT JOIN REQUISITIONDET rd_ref
+                      ON rd_ref.REQID = det_ref.REQID
+                     AND rd_ref.SEQ = det_ref.REQSEQ
+                    WHERE det_ref.POID = po.POID
+                      AND TRIM(COALESCE(
+                            NULLIF(TRIM(det_ref.ITEMRESERVED10), ''),
+                            NULLIF(TRIM(det_ref.ITEMRESERVED9), ''),
+                            NULLIF(TRIM(rd_ref.ITEMRESERVED9), '')
+                          )) <> ''
+                )
+            FROM PO po
+            LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
+            LEFT JOIN PODET det ON det.POID = po.POID
+            LEFT JOIN REQUISITION rq ON rq.REQID = det.REQID
+            LEFT JOIN REQUISITIONDET rd ON rd.REQID = det.REQID AND rd.SEQ = det.REQSEQ
+            WHERE UPPER(TRIM(COALESCE(po.PONO, ''))) STARTING WITH 'AI-SRV'
+              AND COALESCE(po.FREIGHT, 0) <> 0
+              AND UPPER(TRIM(COALESCE(
+                    NULLIF(TRIM(det.ITEMRESERVED10), ''),
+                    NULLIF(TRIM(det.ITEMRESERVED9), ''),
+                    NULLIF(TRIM(rd.ITEMRESERVED9), '')
+                  ))) IN ({placeholders})
+            GROUP BY
+                UPPER(TRIM(COALESCE(
+                    NULLIF(TRIM(det.ITEMRESERVED10), ''),
+                    NULLIF(TRIM(det.ITEMRESERVED9), ''),
+                    NULLIF(TRIM(rd.ITEMRESERVED9), '')
+                ))),
+                po.PONO,
+                po.POID,
+                po.PODATE,
+                pd.NAME,
+                po.FREIGHT
+        """, chunk)
+        seen_add_cost = set()
+        for row in cur.fetchall():
+            no_so = str(row[0] or "").strip().upper()
+            no_delivery = str(row[1] or "").strip()
+            reference_count = max(int(row[6] or 0), 1)
+            add_cost = round(abs(_to_float(row[5])) / reference_count, 2)
+            detail_key = (no_so, no_delivery, add_cost)
+            if not no_so or not add_cost or detail_key in seen_add_cost:
+                continue
+            seen_add_cost.add(detail_key)
+            entry = result.setdefault(no_so, {"amount": 0.0, "po_numbers": [], "details": []})
+            entry["amount"] += add_cost
+            if no_delivery and no_delivery not in entry["po_numbers"]:
+                entry["po_numbers"].append(no_delivery)
+            entry["details"].append({
+                "no_transaksi": no_delivery,
+                "tanggal": str(row[2]) if row[2] else "",
+                "nama_vendor": str(row[3] or "").strip(),
+                "no_barang": "ADD. COST",
+                "deskripsi_barang": "Add Cost Pembelian",
+                "qty": 0,
+                "harga": 0,
+                "nilai_dpp": add_cost,
+                "no_pr": str(row[4] or "").strip(),
+                "source_type": "add_cost",
+            })
 
     for entry in result.values():
         entry["amount"] = round(entry["amount"], 2)
     return result
+
+
+def _profit_loss_delivery_detail_amount(detail):
+    return round(_to_float((detail or {}).get("nilai_dpp")), 2)
+
+
+def _profit_loss_delivery_detail_key(detail):
+    detail = detail or {}
+    return (
+        str(detail.get("no_transaksi") or "").strip(),
+        str(detail.get("no_barang") or "").strip().upper(),
+        round(_to_float(detail.get("qty")), 4),
+        _profit_loss_delivery_detail_amount(detail),
+    )
 
 
 def _profit_loss_apply_delivery(rows, delivery_map):
@@ -10275,6 +12092,7 @@ def _profit_loss_apply_delivery(rows, delivery_map):
     for row in rows:
         row["delivery"] = 0.0
         row["no_delivery"] = ""
+        row["delivery_details"] = []
         no_so = str(row.get("no_so") or "").strip().upper()
         if no_so:
             rows_by_so.setdefault(no_so, []).append(row)
@@ -10282,6 +12100,85 @@ def _profit_loss_apply_delivery(rows, delivery_map):
     for no_so, grouped_rows in rows_by_so.items():
         delivery = delivery_map.get(no_so)
         if not delivery:
+            continue
+
+        details = list(delivery.get("details") or [])
+        add_cost_details = [
+            detail for detail in details
+            if str(detail.get("source_type") or "").strip().lower() == "add_cost"
+        ]
+        item_details = [
+            detail for detail in details
+            if str(detail.get("source_type") or "").strip().lower() != "add_cost"
+        ]
+        if len(grouped_rows) == 1:
+            row = grouped_rows[0]
+            row["delivery"] = round(sum(_profit_loss_delivery_detail_amount(detail) for detail in details), 2)
+            row["no_delivery"] = ", ".join(delivery.get("po_numbers") or [])
+            row["delivery_details"] = details
+            continue
+
+        used_detail_keys = set()
+        matched_any = False
+        for row in sorted(grouped_rows, key=lambda item: (
+            str(item.get("tgl_faktur") or ""),
+            str(item.get("no_faktur") or ""),
+            str(item.get("no_do") or ""),
+        )):
+            row_item = str(row.get("no_barang") or "").strip().upper()
+            row_qty = round(abs(_to_float(row.get("qty_faktur"))), 4)
+            candidates = []
+            for detail in item_details:
+                detail_key = _profit_loss_delivery_detail_key(detail)
+                if detail_key in used_detail_keys:
+                    continue
+                detail_qty = round(abs(_to_float(detail.get("qty"))), 4)
+                detail_item = str(detail.get("no_barang") or "").strip().upper()
+                if abs(detail_qty - row_qty) > 0.0001:
+                    continue
+                item_matches = bool(row_item and detail_item and row_item == detail_item)
+                candidates.append((0 if item_matches else 1, str(detail.get("tanggal") or ""), detail))
+
+            if not candidates:
+                continue
+
+            _, _, detail = sorted(candidates, key=lambda item: (item[0], item[1]))[0]
+            used_detail_keys.add(_profit_loss_delivery_detail_key(detail))
+            row["delivery"] = _profit_loss_delivery_detail_amount(detail)
+            row["no_delivery"] = str(detail.get("no_transaksi") or "").strip()
+            row["delivery_details"] = [detail]
+            matched_any = True
+
+        if matched_any:
+            if add_cost_details:
+                target_amount = round(sum(
+                    _profit_loss_delivery_detail_amount(detail)
+                    for detail in add_cost_details
+                ), 2)
+                total_weight = sum(max(float(row.get("jumlah") or 0), 0) for row in grouped_rows)
+                allocated_amount = 0.0
+                for index, row in enumerate(grouped_rows):
+                    if index == len(grouped_rows) - 1:
+                        row_delivery = round(target_amount - allocated_amount, 2)
+                    elif total_weight > 0:
+                        row_delivery = round(
+                            target_amount * max(float(row.get("jumlah") or 0), 0) / total_weight,
+                            2,
+                        )
+                    else:
+                        row_delivery = round(target_amount / len(grouped_rows), 2)
+                    existing_numbers = [
+                        text.strip()
+                        for text in str(row.get("no_delivery") or "").split(",")
+                        if text.strip()
+                    ]
+                    for po_number in delivery.get("po_numbers") or []:
+                        if po_number and po_number not in existing_numbers:
+                            existing_numbers.append(po_number)
+                    row["delivery"] = round(float(row.get("delivery") or 0) + row_delivery, 2)
+                    row["no_delivery"] = ", ".join(existing_numbers)
+                    row["delivery_details"] = list(row.get("delivery_details") or []) + add_cost_details
+                    allocated_amount += row_delivery
             continue
 
         target_amount = round(float(delivery.get("amount") or 0), 2)
@@ -10299,11 +12196,371 @@ def _profit_loss_apply_delivery(rows, delivery_map):
                 row_delivery = round(target_amount / len(grouped_rows), 2)
             row["delivery"] = row_delivery
             row["no_delivery"] = ", ".join(delivery.get("po_numbers") or [])
+            row["delivery_details"] = delivery.get("details", [])
             allocated_amount += row_delivery
     return rows
 
 
-def _build_profit_loss_rows(cur, date_from="", date_to="", search=""):
+def _profit_loss_extract_do_numbers(description):
+    text = str(description or "").strip().upper()
+    result = []
+    for match in re.finditer(r"\bAI-DO-(\d+(?:\s*,\s*\d+)*)", text):
+        for number in re.split(r"\s*,\s*", match.group(1)):
+            no_do = f"AI-DO-{number}"
+            if no_do not in result:
+                result.append(no_do)
+    return result
+
+
+def _profit_loss_delivery_ju_map(cur):
+    required_jvdet = ("JVID", "GLACCOUNT", "GLAMOUNT", "DESCRIPTION")
+    required_jv = ("JVID", "JVNUMBER")
+    if (
+        not _table_exists(cur, "JVDET")
+        or not _table_exists(cur, "JV")
+        or not _table_has_columns(cur, "JVDET", required_jvdet)
+        or not _table_has_columns(cur, "JV", required_jv)
+    ):
+        return {}
+
+    cur.execute("""
+        SELECT
+            d.GLAMOUNT,
+            d.DESCRIPTION,
+            j.JVNUMBER
+        FROM JVDET d
+        JOIN JV j ON j.JVID = d.JVID
+        WHERE CAST(d.GLACCOUNT AS VARCHAR(30)) = '6.00.00.006'
+          AND UPPER(CAST(d.DESCRIPTION AS VARCHAR(255))) CONTAINING 'AI-DO-'
+    """)
+
+    result = {}
+    for amount, description, journal_no in cur.fetchall():
+        no_dos = _profit_loss_extract_do_numbers(description)
+        if not no_dos:
+            continue
+        amount_per_do = abs(float(amount or 0)) / len(no_dos)
+        for no_do in no_dos:
+            entry = result.setdefault(no_do, {"amount": 0.0, "journal_numbers": [], "details": []})
+            entry["amount"] += amount_per_do
+            normalized_journal_no = str(journal_no or "").strip()
+            if normalized_journal_no and normalized_journal_no not in entry["journal_numbers"]:
+                entry["journal_numbers"].append(normalized_journal_no)
+            entry["details"].append({
+                "no_transaksi": normalized_journal_no,
+                "no_do": no_do,
+                "deskripsi": str(description or "").strip(),
+                "nilai_jurnal": round(abs(float(amount or 0)), 2),
+                "nilai_alokasi": round(amount_per_do, 2),
+            })
+
+    for entry in result.values():
+        entry["amount"] = round(entry["amount"], 2)
+    return result
+
+
+def _profit_loss_apply_delivery_ju(rows, delivery_ju_map):
+    rows_by_do = {}
+    for row in rows:
+        row["delivery_ju"] = 0.0
+        row["no_jurnal_delivery_ju"] = ""
+        row["delivery_ju_details"] = []
+        no_do = str(row.get("no_do") or "").strip().upper()
+        if no_do:
+            rows_by_do.setdefault(no_do, []).append(row)
+
+    for no_do, grouped_rows in rows_by_do.items():
+        delivery_ju = delivery_ju_map.get(no_do)
+        if not delivery_ju:
+            continue
+
+        target_amount = round(float(delivery_ju.get("amount") or 0), 2)
+        total_weight = sum(max(float(row.get("jumlah") or 0), 0) for row in grouped_rows)
+        allocated_amount = 0.0
+        for index, row in enumerate(grouped_rows):
+            if index == len(grouped_rows) - 1:
+                row_delivery_ju = round(target_amount - allocated_amount, 2)
+            elif total_weight > 0:
+                row_delivery_ju = round(
+                    target_amount * max(float(row.get("jumlah") or 0), 0) / total_weight,
+                    2,
+                )
+            else:
+                row_delivery_ju = round(target_amount / len(grouped_rows), 2)
+            row["delivery_ju"] = row_delivery_ju
+            row["no_jurnal_delivery_ju"] = ", ".join(delivery_ju.get("journal_numbers") or [])
+            row["delivery_ju_details"] = delivery_ju.get("details", [])
+            allocated_amount += row_delivery_ju
+    return rows
+
+
+def _profit_loss_mf_map(cur, no_sos):
+    """Ambil MF aktual per SO dari amount AI-MF setelah diskon header, sebelum PPh."""
+    normalized_no_sos = sorted({
+        str(no_so or "").strip().upper()
+        for no_so in no_sos
+        if str(no_so or "").strip()
+    })
+    result = {}
+    if not normalized_no_sos:
+        return result
+
+    line_discpc = sql_number_expr("det.ITEMDISCPC")
+    total_line_discpc = sql_number_expr("det_total.ITEMDISCPC")
+    line_amount = f"""
+        COALESCE(det.QUANTITY, 0)
+        * COALESCE(det.UNITPRICE, 0)
+        * (1 - COALESCE({line_discpc}, 0) / 100)
+    """
+    total_amount = f"""
+        COALESCE(det_total.QUANTITY, 0)
+        * COALESCE(det_total.UNITPRICE, 0)
+        * (1 - COALESCE({total_line_discpc}, 0) / 100)
+    """
+
+    for start in range(0, len(normalized_no_sos), 500):
+        chunk = normalized_no_sos[start:start + 500]
+        mf_references = [f"MF-{no_so}" for no_so in chunk]
+        placeholders = ",".join(["?"] * len(mf_references))
+        cur.execute(f"""
+            SELECT
+                SUBSTRING(UPPER(TRIM(det.ITEMNO)) FROM 4),
+                ai.APINVOICEID,
+                {line_amount},
+                COALESCE(ai.CASHDISCOUNT, 0),
+                ai.INVOICENO,
+                ai.INVOICEDATE,
+                det.ITEMNO
+            FROM APINV ai
+            JOIN APITMDET det ON det.APINVOICEID = ai.APINVOICEID
+            WHERE UPPER(TRIM(COALESCE(ai.INVOICENO, ''))) STARTING WITH 'AI-MF-'
+              AND COALESCE(ai.INVOICETYPE, 1) = 1
+              AND (ai.ISDP IS NULL OR ai.ISDP = 0)
+              AND UPPER(TRIM(COALESCE(det.ITEMNO, ''))) IN ({placeholders})
+        """, mf_references)
+        matched_lines = cur.fetchall()
+        invoice_ids = sorted({int(row[1]) for row in matched_lines})
+        if not invoice_ids:
+            continue
+
+        invoice_placeholders = ",".join(["?"] * len(invoice_ids))
+        cur.execute(f"""
+            SELECT det_total.APINVOICEID, SUM({total_amount})
+            FROM APITMDET det_total
+            WHERE det_total.APINVOICEID IN ({invoice_placeholders})
+            GROUP BY det_total.APINVOICEID
+        """, invoice_ids)
+        invoice_totals = {
+            int(invoice_id): max(float(amount or 0), 0)
+            for invoice_id, amount in cur.fetchall()
+        }
+
+        for no_so, invoice_id, source_amount, cash_discount, invoice_no, invoice_date, item_no in matched_lines:
+            source_amount = max(float(source_amount or 0), 0)
+            invoice_total = invoice_totals.get(int(invoice_id or 0), 0)
+            cash_discount = max(float(cash_discount or 0), 0)
+            if invoice_total <= 0:
+                continue
+            mf_ratio = max(min((invoice_total - cash_discount) / invoice_total, 1), 0)
+            normalized_no_so = str(no_so or "").strip().upper()
+            fee_amount = source_amount * mf_ratio
+            entry = result.setdefault(normalized_no_so, {"amount": 0.0, "rates": [], "details": []})
+            entry["amount"] += fee_amount
+            rate_pct = mf_ratio * 100
+            if not any(abs(existing - rate_pct) < 0.000001 for existing in entry["rates"]):
+                entry["rates"].append(rate_pct)
+            entry["details"].append({
+                "no_transaksi": str(invoice_no or "").strip(),
+                "tanggal": str(invoice_date) if invoice_date else "",
+                "part_number": str(item_no or "").strip(),
+                "amount_asal": round(source_amount, 2),
+                "persentase": _profit_loss_fee_percentage_label([rate_pct]),
+                "nilai_fee": round(fee_amount, 2),
+            })
+
+    return {
+        no_so: {
+            "amount": round(entry["amount"], 2),
+            "percentage": _profit_loss_fee_percentage_label(entry["rates"]),
+            "details": entry["details"],
+        }
+        for no_so, entry in result.items()
+    }
+
+
+def _profit_loss_apply_mf(rows, mf_map):
+    """Alokasikan MF satu kali per SO agar SO dengan banyak item tidak terduplikasi."""
+    rows_by_so = {}
+    for row in rows:
+        row["mf"] = 0.0
+        row["mf_pct"] = ""
+        row["mf_details"] = []
+        no_so = str(row.get("no_so") or "").strip().upper()
+        if no_so:
+            rows_by_so.setdefault(no_so, []).append(row)
+
+    for no_so, grouped_rows in rows_by_so.items():
+        fee = mf_map.get(no_so) or {}
+        target_amount = round(float(fee.get("amount") or 0), 2)
+        if not target_amount:
+            continue
+        total_weight = sum(max(float(row.get("jumlah") or 0), 0) for row in grouped_rows)
+        allocated_amount = 0.0
+        for index, row in enumerate(grouped_rows):
+            if index == len(grouped_rows) - 1:
+                row_mf = round(target_amount - allocated_amount, 2)
+            elif total_weight > 0:
+                row_mf = round(
+                    target_amount * max(float(row.get("jumlah") or 0), 0) / total_weight,
+                    2,
+                )
+            else:
+                row_mf = round(target_amount / len(grouped_rows), 2)
+            row["mf"] = row_mf
+            row["mf_pct"] = fee.get("percentage", "")
+            row["mf_details"] = fee.get("details", [])
+            allocated_amount += row_mf
+    return rows
+
+
+def _profit_loss_fee_percentage_label(rates):
+    labels = []
+    for rate in sorted(float(value or 0) for value in rates):
+        number = f"{rate:.4f}".rstrip("0").rstrip(".")
+        labels.append(f"{number}%")
+    return " + ".join(labels)
+
+
+def _profit_loss_cf_map(cur, no_sos):
+    """Ambil CF aktual per SO dari amount AI-CF setelah diskon header, sebelum PPh."""
+    normalized_no_sos = sorted({
+        str(no_so or "").strip().upper()
+        for no_so in no_sos
+        if str(no_so or "").strip()
+    })
+    result = {}
+    if not normalized_no_sos:
+        return result
+
+    line_discpc = sql_number_expr("det.ITEMDISCPC")
+    total_line_discpc = sql_number_expr("det_total.ITEMDISCPC")
+    line_amount = f"""
+        COALESCE(det.QUANTITY, 0)
+        * COALESCE(det.UNITPRICE, 0)
+        * (1 - COALESCE({line_discpc}, 0) / 100)
+    """
+    total_amount = f"""
+        COALESCE(det_total.QUANTITY, 0)
+        * COALESCE(det_total.UNITPRICE, 0)
+        * (1 - COALESCE({total_line_discpc}, 0) / 100)
+    """
+
+    for start in range(0, len(normalized_no_sos), 500):
+        chunk = normalized_no_sos[start:start + 500]
+        cf_references = [f"CF-{no_so}" for no_so in chunk]
+        placeholders = ",".join(["?"] * len(cf_references))
+        cur.execute(f"""
+            SELECT
+                SUBSTRING(UPPER(TRIM(det.ITEMNO)) FROM 4),
+                ai.APINVOICEID,
+                {line_amount},
+                COALESCE(ai.CASHDISCOUNT, 0),
+                ai.INVOICENO,
+                ai.INVOICEDATE,
+                det.ITEMNO
+            FROM APINV ai
+            JOIN APITMDET det ON det.APINVOICEID = ai.APINVOICEID
+            WHERE UPPER(TRIM(COALESCE(ai.INVOICENO, ''))) STARTING WITH 'AI-CF-'
+              AND COALESCE(ai.INVOICETYPE, 1) = 1
+              AND (ai.ISDP IS NULL OR ai.ISDP = 0)
+              AND UPPER(TRIM(COALESCE(det.ITEMNO, ''))) IN ({placeholders})
+        """, cf_references)
+        matched_lines = cur.fetchall()
+        invoice_ids = sorted({int(row[1]) for row in matched_lines})
+        if not invoice_ids:
+            continue
+
+        invoice_placeholders = ",".join(["?"] * len(invoice_ids))
+        cur.execute(f"""
+            SELECT det_total.APINVOICEID, SUM({total_amount})
+            FROM APITMDET det_total
+            WHERE det_total.APINVOICEID IN ({invoice_placeholders})
+            GROUP BY det_total.APINVOICEID
+        """, invoice_ids)
+        invoice_totals = {
+            int(invoice_id): max(float(amount or 0), 0)
+            for invoice_id, amount in cur.fetchall()
+        }
+
+        for no_so, invoice_id, source_amount, cash_discount, invoice_no, invoice_date, item_no in matched_lines:
+            source_amount = max(float(source_amount or 0), 0)
+            invoice_total = invoice_totals.get(int(invoice_id or 0), 0)
+            cash_discount = max(float(cash_discount or 0), 0)
+            if invoice_total <= 0:
+                continue
+            cf_ratio = max(min((invoice_total - cash_discount) / invoice_total, 1), 0)
+            normalized_no_so = str(no_so or "").strip().upper()
+            fee_amount = source_amount * cf_ratio
+            entry = result.setdefault(normalized_no_so, {"amount": 0.0, "rates": [], "details": []})
+            entry["amount"] += fee_amount
+            rate_pct = cf_ratio * 100
+            if not any(abs(existing - rate_pct) < 0.000001 for existing in entry["rates"]):
+                entry["rates"].append(rate_pct)
+            entry["details"].append({
+                "no_transaksi": str(invoice_no or "").strip(),
+                "tanggal": str(invoice_date) if invoice_date else "",
+                "part_number": str(item_no or "").strip(),
+                "amount_asal": round(source_amount, 2),
+                "persentase": _profit_loss_fee_percentage_label([rate_pct]),
+                "nilai_fee": round(fee_amount, 2),
+            })
+
+    return {
+        no_so: {
+            "amount": round(entry["amount"], 2),
+            "percentage": _profit_loss_fee_percentage_label(entry["rates"]),
+            "details": entry["details"],
+        }
+        for no_so, entry in result.items()
+    }
+
+
+def _profit_loss_apply_cf(rows, cf_map):
+    """Alokasikan CF satu kali per SO agar SO dengan banyak item tidak terduplikasi."""
+    rows_by_so = {}
+    for row in rows:
+        row["cf"] = 0.0
+        row["cf_pct"] = ""
+        row["cf_details"] = []
+        no_so = str(row.get("no_so") or "").strip().upper()
+        if no_so:
+            rows_by_so.setdefault(no_so, []).append(row)
+
+    for no_so, grouped_rows in rows_by_so.items():
+        fee = cf_map.get(no_so) or {}
+        target_amount = round(float(fee.get("amount") or 0), 2)
+        if not target_amount:
+            continue
+        total_weight = sum(max(float(row.get("jumlah") or 0), 0) for row in grouped_rows)
+        allocated_amount = 0.0
+        for index, row in enumerate(grouped_rows):
+            if index == len(grouped_rows) - 1:
+                row_cf = round(target_amount - allocated_amount, 2)
+            elif total_weight > 0:
+                row_cf = round(
+                    target_amount * max(float(row.get("jumlah") or 0), 0) / total_weight,
+                    2,
+                )
+            else:
+                row_cf = round(target_amount / len(grouped_rows), 2)
+            row["cf"] = row_cf
+            row["cf_pct"] = fee.get("percentage", "")
+            row["cf_details"] = fee.get("details", [])
+            allocated_amount += row_cf
+    return rows
+
+
+def _build_profit_loss_rows(cur, date_from="", date_to="", search="", marketing=""):
     where_sql, params = _profit_loss_invoice_where(date_from, date_to)
     cur.execute(f"""
         SELECT
@@ -10384,9 +12641,11 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search=""):
                 det.ITEMUNIT,
                 det.UNITPRICE,
                 COALESCE(CAST(NULLIF(TRIM(CAST(det.ITEMDISCPC AS VARCHAR(32))), '') AS DOUBLE PRECISION), 0),
-                COALESCE(ih.COST, ih.NEWCOST, 0)
+                COALESCE(ih.COST, ih.NEWCOST, 0),
+                COALESCE(NULLIF(TRIM(sm.FIRSTNAME || ' ' || sm.LASTNAME), ''), 'Tanpa Marketing')
             FROM ARINVDET det
             LEFT JOIN SO so ON so.SOID = det.SOID
+            LEFT JOIN SALESMAN sm ON sm.SALESMANID = so.SALESMANID
             LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
             LEFT JOIN ITEMHIST ih ON ih.ITEMHISTID = det.ITEMHISTID
             WHERE det.ARINVOICEID IN ({placeholders})
@@ -10398,6 +12657,7 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search=""):
             unit_price = float(row[7] or 0)
             discount = float(row[8] or 0)
             direct_by_invoice.setdefault(int(row[0] or 0), []).append({
+                "_source_key": f"AR-{int(row[0] or 0)}-{int(row[1] or 0)}",
                 "no_so": str(row[2] or "").strip(),
                 "no_barang": str(row[3] or "").strip(),
                 "deskripsi_barang": str(row[4] or "").strip(),
@@ -10406,6 +12666,7 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search=""):
                 "harga_satuan": unit_price,
                 "jumlah": qty * unit_price * (1 - discount / 100),
                 "_source_hpp": abs(qty) * float(row[9] or 0),
+                "marketing": str(row[10] or "").strip(),
                 "sumber": "Faktur Penjualan",
             })
 
@@ -10434,10 +12695,12 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search=""):
                 det.ITEMUNIT,
                 det.UNITPRICE,
                 COALESCE(CAST(NULLIF(TRIM(CAST(det.ITEMDISCPC AS VARCHAR(32))), '') AS DOUBLE PRECISION), 0),
-                COALESCE(ih.COST, ih.NEWCOST, 0)
+                COALESCE(ih.COST, ih.NEWCOST, 0),
+                COALESCE(NULLIF(TRIM(sm.FIRSTNAME || ' ' || sm.LASTNAME), ''), 'Tanpa Marketing')
             FROM ARINV delivery
             JOIN ARINVDET det ON det.ARINVOICEID = delivery.ARINVOICEID
             LEFT JOIN SO so ON so.SOID = det.SOID
+            LEFT JOIN SALESMAN sm ON sm.SALESMANID = so.SALESMANID
             LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
             LEFT JOIN ITEMHIST ih ON ih.ITEMHISTID = det.ITEMHISTID
             WHERE delivery.CUSTOMERID = ?
@@ -10456,6 +12719,7 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search=""):
                 unit_price = float(row[11] or 0)
                 discount = float(row[12] or 0)
                 delivery_by_group.setdefault(key, []).append({
+                    "_source_key": f"DO-{int(row[2] or 0)}-{int(row[5] or 0)}",
                     "do_id": int(row[2] or 0),
                     "no_do": str(row[3] or "").strip(),
                     "do_date": str(row[4]) if row[4] else "",
@@ -10468,6 +12732,7 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search=""):
                     "harga_satuan": unit_price,
                     "jumlah": qty * unit_price * (1 - discount / 100),
                     "_source_hpp": abs(qty) * float(row[13] or 0),
+                    "marketing": str(row[14] or "").strip(),
                     "sumber": "Faktur dari Pengiriman Barang",
                 })
 
@@ -10514,7 +12779,10 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search=""):
         if not target_amount:
             target_amount = sum(float(row.get("jumlah") or 0) for row in source_lines)
         lines = _profit_loss_allocate_lines(source_lines, target_amount, invoice["hpp"])
-        for line in lines:
+        for line_index, line in enumerate(lines):
+            manual_cost_key = (
+                f"{invoice['invoice_id']}:{line.get('_source_key') or f'ROW-{line_index}'}"
+            )
             result = {
                 "no_faktur": invoice["no_faktur"],
                 "no_do": line.get("no_do", ""),
@@ -10528,18 +12796,63 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search=""):
                 "jumlah": round(float(line.get("jumlah") or 0), 2),
                 "nilai_hpp": round(float(line.get("nilai_hpp") or 0), 2),
                 "delivery": 0.0,
+                "delivery_ju": 0.0,
+                "cf": 0.0,
+                "mf": 0.0,
+                "biaya_project": 0.0,
+                "total_biaya": 0.0,
+                "laba_operasi": 0.0,
+                "manual_cost_key": manual_cost_key,
                 "gross_profit": round(float(line.get("gross_profit") or 0), 2),
                 "margin_pct": round(float(line.get("margin_pct") or 0), 2),
                 "no_pelanggan": invoice["no_pelanggan"],
                 "nama_pelanggan": invoice["nama_pelanggan"],
                 "no_po": invoice["no_po"],
+                "marketing": line.get("marketing", ""),
                 "no_delivery": "",
                 "sumber": line.get("sumber", "Faktur Penjualan"),
             }
             data.append(result)
 
+    marketing_filter = str(marketing or "").strip().upper()
+    if marketing_filter:
+        data = [
+            row for row in data
+            if str(row.get("marketing") or "").strip().upper() == marketing_filter
+        ]
+
     delivery_map = _profit_loss_delivery_map(cur, [row.get("no_so") for row in data])
     _profit_loss_apply_delivery(data, delivery_map)
+    delivery_ju_map = _profit_loss_delivery_ju_map(cur)
+    _profit_loss_apply_delivery_ju(data, delivery_ju_map)
+    mf_map = _profit_loss_mf_map(cur, [row.get("no_so") for row in data])
+    _profit_loss_apply_mf(data, mf_map)
+    cf_map = _profit_loss_cf_map(cur, [row.get("no_so") for row in data])
+    _profit_loss_apply_cf(data, cf_map)
+    manual_costs = get_profit_loss_manual_costs(
+        [row.get("manual_cost_key") for row in data]
+    )
+    for row in data:
+        manual = manual_costs.get(row["manual_cost_key"], {})
+        row["biaya_project"] = round(float(manual.get("biaya_project") or 0), 2)
+        row["total_biaya"] = round(
+            float(row.get("delivery") or 0)
+            + float(row.get("delivery_ju") or 0)
+            + row["cf"]
+            + row["mf"]
+            + row["biaya_project"],
+            2,
+        )
+        row["laba_operasi"] = round(
+            float(row.get("gross_profit") or 0) - row["total_biaya"],
+            2,
+        )
+        row["margin_pct"] = round(
+            (row["laba_operasi"] / float(row.get("jumlah") or 0) * 100)
+            if float(row.get("jumlah") or 0)
+            else 0,
+            2,
+        )
 
     search_lower = str(search or "").strip().lower()
     if search_lower:
@@ -10554,16 +12867,74 @@ def _profit_loss_summary(rows):
     total_jumlah = round(sum(float(row.get("jumlah") or 0) for row in rows), 2)
     total_hpp = round(sum(float(row.get("nilai_hpp") or 0) for row in rows), 2)
     total_delivery = round(sum(float(row.get("delivery") or 0) for row in rows), 2)
+    total_delivery_ju = round(sum(float(row.get("delivery_ju") or 0) for row in rows), 2)
+    total_cf = round(sum(float(row.get("cf") or 0) for row in rows), 2)
+    total_mf = round(sum(float(row.get("mf") or 0) for row in rows), 2)
+    total_biaya_project = round(sum(float(row.get("biaya_project") or 0) for row in rows), 2)
+    total_biaya = round(sum(float(row.get("total_biaya") or 0) for row in rows), 2)
     gross_profit = round(total_jumlah - total_hpp, 2)
+    laba_operasi = round(gross_profit - total_biaya, 2)
     return {
         "total_baris": len(rows),
         "total_faktur": len({row.get("no_faktur") for row in rows if row.get("no_faktur")}),
         "total_jumlah": total_jumlah,
         "total_hpp": total_hpp,
         "total_delivery": total_delivery,
+        "total_delivery_ju": total_delivery_ju,
+        "total_cf": total_cf,
+        "total_mf": total_mf,
+        "total_biaya_project": total_biaya_project,
+        "total_biaya": total_biaya,
         "gross_profit": gross_profit,
-        "margin_pct": round((gross_profit / total_jumlah * 100) if total_jumlah else 0, 2),
+        "laba_operasi": laba_operasi,
+        "margin_pct": round((laba_operasi / total_jumlah * 100) if total_jumlah else 0, 2),
     }
+
+
+PROFIT_LOSS_EXPORT_COLUMNS = {
+    "no_faktur",
+    "no_do",
+    "no_so",
+    "tgl_faktur",
+    "no_barang",
+    "deskripsi_barang",
+    "qty_faktur",
+    "uom",
+    "harga_satuan",
+    "jumlah",
+    "nilai_hpp",
+    "gross_profit",
+    "delivery",
+    "delivery_ju",
+    "cf",
+    "cf_pct",
+    "mf",
+    "mf_pct",
+    "biaya_project",
+    "total_biaya",
+    "laba_operasi",
+    "margin_pct",
+    "nama_pelanggan",
+    "no_po",
+    "marketing",
+}
+
+
+def _profit_loss_export_rows(rows):
+    return [
+        {key: row.get(key) for key in PROFIT_LOSS_EXPORT_COLUMNS}
+        for row in rows
+    ]
+
+
+def _profit_loss_marketing_options(cur):
+    cur.execute("""
+        SELECT DISTINCT COALESCE(NULLIF(TRIM(sm.FIRSTNAME || ' ' || sm.LASTNAME), ''), 'Tanpa Marketing')
+        FROM SALESMAN sm
+        WHERE sm.SALESMANID IS NOT NULL
+        ORDER BY 1
+    """)
+    return [str(row[0] or "").strip() for row in cur.fetchall() if str(row[0] or "").strip()]
 
 
 @app.route("/api/profit-loss")
@@ -10575,16 +12946,19 @@ def api_profit_loss():
         search = request.args.get("search", "")
         date_from = request.args.get("date_from", "")
         date_to = request.args.get("date_to", "")
+        marketing = request.args.get("marketing", "").strip()
         offset = int(request.args.get("offset", 0))
         limit = int(request.args.get("limit", 50))
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
-        rows = _build_profit_loss_rows(cur, date_from, date_to, search)
+        rows = _build_profit_loss_rows(cur, date_from, date_to, search, marketing)
+        marketing_options = _profit_loss_marketing_options(cur)
         con.close()
         return jsonify({
             "data": filter_record_columns("profit_loss", rows[offset:offset + limit]),
             "total": len(rows),
             "summary": _profit_loss_summary(rows),
+            "marketing_options": marketing_options,
         })
     except Exception as e:
         print(f"Error api_profit_loss: {e}")
@@ -10600,14 +12974,70 @@ def api_profit_loss_export():
         search = request.args.get("search", "")
         date_from = request.args.get("date_from", "")
         date_to = request.args.get("date_to", "")
+        marketing = request.args.get("marketing", "").strip()
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
-        rows = _build_profit_loss_rows(cur, date_from, date_to, search)
+        rows = _build_profit_loss_rows(cur, date_from, date_to, search, marketing)
         con.close()
-        return jsonify({"data": filter_record_columns("profit_loss", rows), "total": len(rows)})
+        return jsonify({"data": _profit_loss_export_rows(rows), "total": len(rows)})
     except Exception as e:
         print(f"Error api_profit_loss_export: {e}")
         return jsonify({"data": [], "total": 0, "error": str(e)}), 500
+
+
+@app.route("/api/profit-loss/marketing-options")
+@jwt_required()
+def api_profit_loss_marketing_options():
+    if not check_permission("akuntansi"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        data = _profit_loss_marketing_options(cur)
+        con.close()
+        return jsonify({"data": data})
+    except Exception as e:
+        print(f"Error api_profit_loss_marketing_options: {e}")
+        return jsonify({"data": [], "error": str(e)}), 500
+
+
+@app.route("/api/profit-loss/manual-cost", methods=["POST"])
+@jwt_required()
+def api_profit_loss_manual_cost_save():
+    if not check_permission("akuntansi"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        data = request.get_json(silent=True) or {}
+        row_key = str(data.get("row_key") or "").strip()
+        if not row_key:
+            return jsonify({"message": "Identitas baris Profit & Loss tidak ditemukan."}), 400
+
+        cf = max(_to_float(data.get("cf")), 0)
+        mf = max(_to_float(data.get("mf")), 0)
+        project_cost = max(_to_float(data.get("biaya_project")), 0)
+        user = get_current_user()
+        saved = save_profit_loss_manual_cost(
+            row_key=row_key,
+            cf=cf,
+            mf=mf,
+            project_cost=project_cost,
+            updated_by=user.get("username"),
+        )
+        audit_current_user(
+            "profit_loss_manual_cost_save",
+            "akuntansi",
+            f"Input biaya manual Profit & Loss {row_key}",
+            {
+                "row_key": row_key,
+                "cf": cf,
+                "mf": mf,
+                "biaya_project": project_cost,
+            },
+        )
+        return jsonify({"message": "Biaya manual disimpan.", "data": saved})
+    except Exception as e:
+        print(f"Error api_profit_loss_manual_cost_save: {e}")
+        return jsonify({"message": "Gagal menyimpan biaya manual.", "error": str(e)}), 500
 
 
 @app.route("/api/hpp")
@@ -12924,8 +15354,9 @@ def _do_where_clause(search, date_from, date_to):
             OR LOWER(so.SONO)           CONTAINING LOWER(?)
             OR LOWER(det.ITEMNO)        CONTAINING LOWER(?)
             OR LOWER(det.ITEMOVDESC)    CONTAINING LOWER(?)
+            OR LOWER(COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, '')) CONTAINING LOWER(?)
         )""")
-        params += [search, search, search, search, search, search]
+        params += [search, search, search, search, search, search, search]
 
     if date_from:
         conditions.append("ar.INVOICEDATE >= ?")
@@ -12951,7 +15382,12 @@ _DO_SELECT = """
     det.QUANTITY,
     det.ITEMUNIT,
     ar.DELIVERYORDER,
-    ar.ARINVOICEID
+    ar.ARINVOICEID,
+    COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, ''),
+    so.ESTSHIPDATE,
+    COALESCE(sodet.QUANTITY, det.QUANTITY),
+    det.QUANTITY,
+    {stock_expr}
 """
 
 _DO_FROM = """
@@ -12959,6 +15395,8 @@ _DO_FROM = """
     LEFT JOIN PERSONDATA pd  ON pd.ID = ar.CUSTOMERID
     LEFT JOIN ARINVDET   det ON det.ARINVOICEID = ar.ARINVOICEID
     LEFT JOIN SO         so  ON so.SOID = det.SOID
+    LEFT JOIN SODET      sodet ON sodet.SOID = det.SOID AND sodet.SEQ = det.SOSEQ
+    LEFT JOIN SALESMAN   sm ON sm.SALESMANID = so.SALESMANID
     LEFT JOIN ITEM       i   ON i.ITEMNO = det.ITEMNO
 """
 
@@ -12980,7 +15418,238 @@ def _build_do_rows(rows):
             "qty":              float(row[10] or 0),
             "uom":              str(row[11] or "").strip(),
             "no_do":            str(row[12] or "").strip(),
+            "marketing":        str(row[14] or "").strip().title(),
+            "tgl_estimasi_so":  str(row[15]) if row[15] else "",
+            "qty_so":           float(row[16] or 0),
+            "qty_shipped":      float(row[17] or 0),
+            "stok_barang":      float(row[18] or 0),
         })
+    return data
+
+
+def _sales_delivery_monitor_where(
+    search="",
+    date_from="",
+    date_to="",
+    marketing="",
+    keterangan_so="",
+    status_do="",
+):
+    conditions = ["UPPER(TRIM(COALESCE(so.SONO, ''))) STARTING WITH 'AI-PP-'"]
+    params = []
+    if search:
+        conditions.append("""(
+            LOWER(so.SONO) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(pd.NAME, '')) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(so.PONO, '')) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(delivery_docs.INVOICENO, '')) CONTAINING LOWER(?)
+            OR LOWER(sodet.ITEMNO) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(sodet.ITEMOVDESC, i.ITEMDESCRIPTION, '')) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, '')) CONTAINING LOWER(?)
+        )""")
+        params += [search] * 7
+    if date_from:
+        conditions.append("so.SODATE >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("so.SODATE <= ?")
+        params.append(date_to)
+    if marketing:
+        conditions.append(
+            "UPPER(TRIM(COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, ''))) = UPPER(?)"
+        )
+        params.append(marketing)
+    if keterangan_so == "done":
+        conditions.append("delivery_docs.INVOICENO IS NOT NULL")
+    elif keterangan_so == "late":
+        conditions.append(
+            "delivery_docs.INVOICENO IS NULL AND so.ESTSHIPDATE < CURRENT_DATE"
+        )
+    elif keterangan_so == "today":
+        conditions.append(
+            "delivery_docs.INVOICENO IS NULL AND so.ESTSHIPDATE = CURRENT_DATE"
+        )
+    elif keterangan_so == "tomorrow":
+        conditions.append(
+            "delivery_docs.INVOICENO IS NULL AND so.ESTSHIPDATE = CURRENT_DATE + 1"
+        )
+    elif keterangan_so == "progress":
+        conditions.append(
+            "delivery_docs.INVOICENO IS NULL AND so.ESTSHIPDATE > CURRENT_DATE + 1"
+        )
+    elif keterangan_so == "empty":
+        conditions.append(
+            "delivery_docs.INVOICENO IS NULL AND so.ESTSHIPDATE IS NULL"
+        )
+
+    if status_do == "waiting":
+        conditions.append("COALESCE(delivery_count.DELIVERY_COUNT, 0) = 0")
+    elif status_do == "incomplete":
+        conditions.append("""
+            COALESCE(delivery_count.DELIVERY_COUNT, 0) > 0
+            AND (
+                COALESCE(delivery_status.MISSING_ITEM_COUNT, 0) > 0
+                OR COALESCE(delivery_status.PARTIAL_ITEM_COUNT, 0) > 0
+            )
+        """)
+    elif status_do == "complete":
+        conditions.append("""
+            COALESCE(delivery_count.DELIVERY_COUNT, 0) > 0
+            AND COALESCE(delivery_status.MISSING_ITEM_COUNT, 0) = 0
+            AND COALESCE(delivery_status.PARTIAL_ITEM_COUNT, 0) = 0
+        """)
+    return " AND ".join(conditions), params
+
+
+def _sales_delivery_monitor_from():
+    return """
+        FROM SO so
+        JOIN SODET sodet ON sodet.SOID = so.SOID
+        LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+        LEFT JOIN SALESMAN sm ON sm.SALESMANID = so.SALESMANID
+        LEFT JOIN ITEM i ON i.ITEMNO = sodet.ITEMNO
+        LEFT JOIN (
+            SELECT
+                det.SOID,
+                det.SOSEQ,
+                det.ITEMNO,
+                LIST(DISTINCT ar.INVOICENO, ', ') AS INVOICENO,
+                MAX(ar.INVOICEDATE) AS INVOICEDATE
+            FROM ARINV ar
+            JOIN ARINVDET det ON det.ARINVOICEID = ar.ARINVOICEID
+            WHERE ar.DELIVERYORDER IS NOT NULL
+              AND TRIM(ar.DELIVERYORDER) <> ''
+            GROUP BY det.SOID, det.SOSEQ, det.ITEMNO
+        ) delivery_docs
+          ON delivery_docs.SOID = so.SOID
+         AND delivery_docs.SOSEQ = sodet.SEQ
+         AND delivery_docs.ITEMNO = sodet.ITEMNO
+        LEFT JOIN (
+            SELECT
+                sd.SOID,
+                SUM(CASE
+                    WHEN COALESCE(sd.QUANTITY, 0) > 0
+                     AND COALESCE(sd.QTYSHIPPED, 0) <= 0
+                    THEN 1 ELSE 0
+                END) AS MISSING_ITEM_COUNT,
+                SUM(CASE
+                    WHEN COALESCE(sd.QTYSHIPPED, 0) > 0
+                     AND COALESCE(sd.QTYSHIPPED, 0) < COALESCE(sd.QUANTITY, 0)
+                    THEN COALESCE(sd.QUANTITY, 0) - COALESCE(sd.QTYSHIPPED, 0)
+                    ELSE 0
+                END) AS PARTIAL_QTY_SHORTAGE,
+                SUM(CASE
+                    WHEN COALESCE(sd.QTYSHIPPED, 0) > 0
+                     AND COALESCE(sd.QTYSHIPPED, 0) < COALESCE(sd.QUANTITY, 0)
+                    THEN 1 ELSE 0
+                END) AS PARTIAL_ITEM_COUNT
+            FROM SODET sd
+            GROUP BY sd.SOID
+        ) delivery_status
+          ON delivery_status.SOID = so.SOID
+        LEFT JOIN (
+            SELECT
+                delivery_det.SOID,
+                COUNT(DISTINCT delivery_ar.ARINVOICEID) AS DELIVERY_COUNT
+            FROM ARINV delivery_ar
+            JOIN ARINVDET delivery_det
+              ON delivery_det.ARINVOICEID = delivery_ar.ARINVOICEID
+            WHERE delivery_ar.DELIVERYORDER IS NOT NULL
+              AND TRIM(delivery_ar.DELIVERYORDER) <> ''
+            GROUP BY delivery_det.SOID
+        ) delivery_count
+          ON delivery_count.SOID = so.SOID
+    """
+
+
+def _sales_delivery_status(qty_so, qty_shipped):
+    qty_so = float(qty_so or 0)
+    qty_shipped = float(qty_shipped or 0)
+    if qty_so > 0 and qty_shipped >= qty_so:
+        return "Diterima"
+    if qty_shipped > 0:
+        return "Diproses"
+    return "Menunggu"
+
+
+def _format_delivery_shortage(value):
+    number = float(value or 0)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def _sales_delivery_do_status(delivery_count, missing_items, partial_qty, partial_items):
+    if int(delivery_count or 0) <= 0:
+        return "Menunggu"
+
+    missing_items = int(missing_items or 0)
+    partial_items = int(partial_items or 0)
+    partial_qty = float(partial_qty or 0)
+    parts = []
+    if missing_items > 0:
+        parts.append(f"Kurang {missing_items} item")
+    if partial_items > 0 and partial_qty > 0:
+        qty_label = _format_delivery_shortage(partial_qty)
+        parts.append(f"Kurang {qty_label} qty" if missing_items > 0 else f"Kurang {qty_label}")
+    return " + ".join(parts) if parts else "Lengkap"
+
+
+def _sales_delivery_age(estimated_date):
+    if not estimated_date:
+        return None
+    return (estimated_date - datetime.now().date()).days
+
+
+def _sales_delivery_age_label(age, has_delivery=False):
+    if has_delivery:
+        return "Selesai"
+    if age is None:
+        return ""
+    if age < 0:
+        return "Late"
+    if age == 0:
+        return "DT Hari Ini"
+    if age == 1:
+        return "DT Besok"
+    return "On Progress"
+
+
+def _build_sales_delivery_monitor_rows(rows):
+    data = []
+    for row in rows:
+        age = _sales_delivery_age(row[3])
+        row_key = f"{int(row[15])}:{int(row[16])}"
+        data.append({
+            "marketing": str(row[0] or "").strip().title(),
+            "no_pesanan": str(row[1] or "").strip(),
+            "tgl_pesanan": str(row[2]) if row[2] else "",
+            "tgl_estimasi_so": str(row[3]) if row[3] else "",
+            "no_pelanggan": str(row[4] or "").strip(),
+            "nama_pelanggan": str(row[5] or "").strip(),
+            "no_po": str(row[6] or "").strip(),
+            "no_pengiriman": str(row[7] or "").strip(),
+            "tgl_pengiriman": str(row[8]) if row[8] else "",
+            "no_barang": str(row[9] or "").strip(),
+            "deskripsi_barang": str(row[10] or "").strip(),
+            "qty_so": float(row[11] or 0),
+            "qty_shipped": float(row[12] or 0),
+            "stok_barang": float(row[13] or 0),
+            "uom": str(row[14] or "").strip(),
+            "status_so": _sales_delivery_status(row[11], row[12]),
+            "status_do": _sales_delivery_do_status(row[20], row[17], row[18], row[19]),
+            "umur": age,
+            "keterangan_so": _sales_delivery_age_label(age, bool(row[7])),
+            "row_key": row_key,
+            "no_do": str(row[7] or "").strip(),
+            "deskripsi": "",
+        })
+    remark_map = get_sales_delivery_remarks([row["row_key"] for row in data])
+    for row in data:
+        saved = remark_map.get(row["row_key"], {})
+        row["remark"] = saved.get("remark", "")
+        row["remark_updated_by"] = saved.get("updated_by", "")
+        row["remark_updated_at"] = saved.get("updated_at", "")
     return data
 
 
@@ -12994,45 +15663,169 @@ def api_penjualan_do():
         search    = request.args.get("search", "")
         date_from = request.args.get("date_from", "")
         date_to   = request.args.get("date_to", "")
+        marketing = request.args.get("marketing", "").strip()
+        keterangan_so = request.args.get("keterangan_so", "").strip().lower()
+        status_do = request.args.get("status_do", "").strip().lower()
         offset    = int(request.args.get("offset", 0))
         limit     = int(request.args.get("limit", 50))
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
 
-        where_sql, params_where = _do_where_clause(search, date_from, date_to)
+        where_sql, params_where = _sales_delivery_monitor_where(
+            search, date_from, date_to, marketing, keterangan_so, status_do
+        )
+        from_sql = _sales_delivery_monitor_from()
+        stock_expr = _centre_stock_expr("i.ITEMNO")
 
         sql = f"""
             SELECT FIRST ? SKIP ?
-                {_DO_SELECT}
-            {_DO_FROM}
+                COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, ''),
+                so.SONO,
+                so.SODATE,
+                so.ESTSHIPDATE,
+                pd.PERSONNO,
+                pd.NAME,
+                so.PONO,
+                delivery_docs.INVOICENO,
+                delivery_docs.INVOICEDATE,
+                sodet.ITEMNO,
+                COALESCE(NULLIF(TRIM(sodet.ITEMOVDESC), ''), i.ITEMDESCRIPTION),
+                sodet.QUANTITY,
+                sodet.QTYSHIPPED,
+                {stock_expr},
+                sodet.ITEMUNIT,
+                so.SOID,
+                sodet.SEQ,
+                delivery_status.MISSING_ITEM_COUNT,
+                delivery_status.PARTIAL_QTY_SHORTAGE,
+                delivery_status.PARTIAL_ITEM_COUNT,
+                delivery_count.DELIVERY_COUNT
+            {from_sql}
             WHERE {where_sql}
-            ORDER BY ar.INVOICEDATE DESC, ar.INVOICENO, det.SEQ
+            ORDER BY so.SODATE DESC, so.SONO, sodet.SEQ
         """
         cur.execute(sql, [limit, offset] + params_where)
         rows = cur.fetchall()
 
-        # Count distinct DO header
+        # Ringkasan dihitung per SO, bukan per baris item.
         sql_count = f"""
-            SELECT COUNT(DISTINCT ar.ARINVOICEID)
-            {_DO_FROM}
+            SELECT DISTINCT
+                so.SOID,
+                delivery_status.MISSING_ITEM_COUNT,
+                delivery_status.PARTIAL_ITEM_COUNT,
+                delivery_count.DELIVERY_COUNT
+            {from_sql}
             WHERE {where_sql}
         """
         cur.execute(sql_count, params_where)
-        total_do = int(cur.fetchone()[0] or 0)
+        summary_rows = cur.fetchall()
+        total_so = len(summary_rows)
+        waiting_so = sum(1 for row in summary_rows if int(row[3] or 0) <= 0)
+        incomplete_so = sum(
+            1 for row in summary_rows
+            if int(row[3] or 0) > 0
+            and (int(row[1] or 0) > 0 or int(row[2] or 0) > 0)
+        )
+        complete_so = total_so - waiting_so - incomplete_so
+
+        sql_total_rows = f"""
+            SELECT COUNT(*)
+            {from_sql}
+            WHERE {where_sql}
+        """
+        cur.execute(sql_total_rows, params_where)
+        total_rows = int((cur.fetchone() or [0])[0] or 0)
+
+        option_where, option_params = _sales_delivery_monitor_where(
+            search, date_from, date_to, "", keterangan_so, status_do
+        )
+        cur.execute(f"""
+            SELECT DISTINCT COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, '')
+            {from_sql}
+            WHERE {option_where}
+            ORDER BY 1
+        """, option_params)
+        marketing_options = [
+            str(row[0] or "").strip().title()
+            for row in cur.fetchall()
+            if str(row[0] or "").strip()
+        ]
 
         con.close()
 
-        data = _build_do_rows(rows)
+        data = _build_sales_delivery_monitor_rows(rows)
         return jsonify({
             "data":      filter_record_columns("penjualan_do", data),
-            "total_rows": len(data),
-            "total_do":  total_do,
+            "total_rows": total_rows,
+            "total_do": total_so,
+            "summary": {
+                "total_so": total_so,
+                "waiting_so": waiting_so,
+                "incomplete_so": incomplete_so,
+                "complete_so": complete_so,
+            },
+            "marketing_options": marketing_options,
         })
 
     except Exception as e:
         print(f"Error api_penjualan_do: {e}")
-        return jsonify({"data": [], "total_rows": 0, "total_do": 0, "error": str(e)})
+        return jsonify({
+            "data": [],
+            "total_rows": 0,
+            "total_do": 0,
+            "summary": {
+                "total_so": 0,
+                "waiting_so": 0,
+                "incomplete_so": 0,
+                "complete_so": 0,
+            },
+            "marketing_options": [],
+            "error": str(e),
+        })
+
+
+@app.route("/api/penjualan-do/remark", methods=["POST"])
+@jwt_required()
+def api_penjualan_do_remark_save():
+    if not check_permission("penjualan_do"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        payload = request.get_json(silent=True) or {}
+        row_key = str(payload.get("row_key") or "").strip()
+        remark = str(payload.get("remark") or "").strip()
+        if not re.fullmatch(r"\d+:\d+", row_key):
+            return jsonify({"message": "Identitas baris pengiriman tidak valid."}), 400
+        if len(remark) > 500:
+            return jsonify({"message": "Remaks maksimal 500 karakter."}), 400
+
+        soid, soseq = [int(value) for value in row_key.split(":", 1)]
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT FIRST 1 so.SONO
+            FROM SO so
+            JOIN SODET sodet ON sodet.SOID = so.SOID
+            WHERE so.SOID = ? AND sodet.SEQ = ?
+              AND UPPER(TRIM(COALESCE(so.SONO, ''))) STARTING WITH 'AI-PP-'
+        """, [soid, soseq])
+        valid_row = cur.fetchone()
+        con.close()
+        if not valid_row:
+            return jsonify({"message": "Baris pengiriman tidak ditemukan."}), 404
+
+        user = get_current_user()
+        saved = save_sales_delivery_remark(row_key, remark, user.get("username"))
+        audit_current_user(
+            "sales_delivery_remark_update",
+            "penjualan_do",
+            f"Update remaks {str(valid_row[0] or '').strip()} baris {soseq}",
+            saved,
+        )
+        return jsonify({"message": "Remaks disimpan.", "data": saved})
+    except Exception as e:
+        print(f"Error api_penjualan_do_remark_save: {e}")
+        return jsonify({"message": "Gagal menyimpan remaks.", "error": str(e)}), 500
 
 
 @app.route("/api/penjualan-do/export")
@@ -13045,23 +15838,51 @@ def api_penjualan_do_export():
         search    = request.args.get("search", "")
         date_from = request.args.get("date_from", "")
         date_to   = request.args.get("date_to", "")
+        marketing = request.args.get("marketing", "").strip()
+        keterangan_so = request.args.get("keterangan_so", "").strip().lower()
+        status_do = request.args.get("status_do", "").strip().lower()
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
 
-        where_sql, params_where = _do_where_clause(search, date_from, date_to)
+        where_sql, params_where = _sales_delivery_monitor_where(
+            search, date_from, date_to, marketing, keterangan_so, status_do
+        )
+        from_sql = _sales_delivery_monitor_from()
+        stock_expr = _centre_stock_expr("i.ITEMNO")
 
         sql = f"""
-            SELECT {_DO_SELECT}
-            {_DO_FROM}
+            SELECT
+                COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, ''),
+                so.SONO,
+                so.SODATE,
+                so.ESTSHIPDATE,
+                pd.PERSONNO,
+                pd.NAME,
+                so.PONO,
+                delivery_docs.INVOICENO,
+                delivery_docs.INVOICEDATE,
+                sodet.ITEMNO,
+                COALESCE(NULLIF(TRIM(sodet.ITEMOVDESC), ''), i.ITEMDESCRIPTION),
+                sodet.QUANTITY,
+                sodet.QTYSHIPPED,
+                {stock_expr},
+                sodet.ITEMUNIT,
+                so.SOID,
+                sodet.SEQ,
+                delivery_status.MISSING_ITEM_COUNT,
+                delivery_status.PARTIAL_QTY_SHORTAGE,
+                delivery_status.PARTIAL_ITEM_COUNT,
+                delivery_count.DELIVERY_COUNT
+            {from_sql}
             WHERE {where_sql}
-            ORDER BY ar.INVOICEDATE DESC, ar.INVOICENO, det.SEQ
+            ORDER BY so.SODATE DESC, so.SONO, sodet.SEQ
         """
         cur.execute(sql, params_where)
         rows = cur.fetchall()
         con.close()
 
-        data = _build_do_rows(rows)
+        data = _build_sales_delivery_monitor_rows(rows)
         return jsonify({"data": filter_record_columns("penjualan_do", data), "total_rows": len(data)})
 
     except Exception as e:
@@ -13072,6 +15893,487 @@ def api_penjualan_do_export():
 
 # ─── DAFTAR INVOICE PENJUALAN ─────────────────────────────────────────────────
 #
+DELIVERY_DOCUMENT_TYPES = {
+    "Delivery Order",
+    "Good Receipt",
+    "Sample Request",
+    "TDO",
+    "Surat Jalan Lainnya",
+}
+
+
+def _delivery_time_where(search="", date_from="", date_to=""):
+    conditions = [
+        "TRIM(CAST(ar.DELIVERYORDER AS VARCHAR(32))) = '1'",
+    ]
+    params = []
+    if search:
+        conditions.append("""(
+            LOWER(ar.INVOICENO) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(refs.SONO, '')) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(ar.PURCHASEORDERNO, refs.SO_PONO, '')) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(pd.NAME, '')) CONTAINING LOWER(?)
+        )""")
+        params += [search] * 4
+    if date_from:
+        conditions.append("ar.INVOICEDATE >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("ar.INVOICEDATE <= ?")
+        params.append(date_to)
+    return " AND ".join(conditions), params
+
+
+def _delivery_time_from():
+    return """
+        FROM ARINV ar
+        LEFT JOIN PERSONDATA pd ON pd.ID = ar.CUSTOMERID
+        LEFT JOIN (
+            SELECT
+                det.ARINVOICEID,
+                LIST(DISTINCT so.SONO, ', ') AS SONO,
+                LIST(DISTINCT so.PONO, ', ') AS SO_PONO
+            FROM ARINVDET det
+            LEFT JOIN SO so ON so.SOID = det.SOID
+            GROUP BY det.ARINVOICEID
+        ) refs ON refs.ARINVOICEID = ar.ARINVOICEID
+    """
+
+
+def _build_delivery_time_rows(rows):
+    data = [{
+        "arinvoice_id": int(row[0]),
+        "no_pengiriman": str(row[1] or "").strip(),
+        "tgl_pengiriman": str(row[2]) if row[2] else "",
+        "no_so": str(row[3] or "").strip(),
+        "no_po": str(row[4] or "").strip(),
+        "customer": str(row[5] or "").strip(),
+    } for row in rows]
+    manual_map = get_delivery_time_tracking([row["arinvoice_id"] for row in data])
+    empty_manual = {
+        "jenis_dokumen": "",
+        "remarks_do": "",
+        "expedition": "",
+        "ket_pengiriman": "",
+        "resi": "",
+        "etd": "",
+        "eta_cust": "",
+        "receive_date": "",
+        "status_pengiriman": "",
+        "target_do_kembali": "",
+        "do_kembali": "",
+        "status_do_kembali": "",
+        "isue_pengiriman": "",
+        "updated_by": "",
+        "updated_at": "",
+    }
+    for row in data:
+        row.update(manual_map.get(row["arinvoice_id"], empty_manual))
+        row["status_pengiriman"] = _delivery_date_status(
+            row.get("eta_cust"),
+            row.get("receive_date"),
+        )
+        row["status_do_kembali"] = _delivery_return_status(
+            row.get("target_do_kembali"),
+            row.get("do_kembali"),
+        )
+    return data
+
+
+def _delivery_date_status(target_date, actual_date):
+    if not target_date or not actual_date:
+        return ""
+    try:
+        target = datetime.strptime(str(target_date), "%Y-%m-%d").date()
+        actual = datetime.strptime(str(actual_date), "%Y-%m-%d").date()
+    except ValueError:
+        return ""
+    difference = (target - actual).days
+    if difference >= 0:
+        return f"Ontime {difference} hari"
+    return f"Late {abs(difference)} hari"
+
+
+def _delivery_return_status(target_date, return_date):
+    return _delivery_date_status(target_date, return_date)
+
+
+def _parse_iso_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+@app.route("/api/kpi/time-on-delivery")
+@jwt_required()
+def api_kpi_time_on_delivery():
+    if not check_permission("kpi_time_on_delivery"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        current_year = datetime.now().year
+        year = int(request.args.get("year", current_year))
+        if year < 2000 or year > current_year + 1:
+            return jsonify({"message": "Tahun KPI tidak valid."}), 400
+
+        date_from = f"{year:04d}-01-01"
+        date_to = f"{year + 1:04d}-01-01"
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT ar.ARINVOICEID, ar.INVOICEDATE
+            FROM ARINV ar
+            WHERE TRIM(CAST(ar.DELIVERYORDER AS VARCHAR(32))) = '1'
+              AND ar.INVOICEDATE >= ?
+              AND ar.INVOICEDATE < ?
+            ORDER BY ar.INVOICEDATE, ar.ARINVOICEID
+        """, [date_from, date_to])
+        delivery_rows = cur.fetchall()
+        cur.execute("""
+            SELECT DISTINCT EXTRACT(YEAR FROM ar.INVOICEDATE)
+            FROM ARINV ar
+            WHERE TRIM(CAST(ar.DELIVERYORDER AS VARCHAR(32))) = '1'
+              AND ar.INVOICEDATE IS NOT NULL
+            ORDER BY 1 DESC
+        """)
+        available_years = sorted(
+            {int(row[0]) for row in cur.fetchall()} | {year},
+            reverse=True,
+        )
+        con.close()
+
+        manual_map = get_delivery_time_tracking([row[0] for row in delivery_rows])
+        result = [{
+            "month": month,
+            "target": 0,
+            "pengiriman_lebih_cepat": 0,
+            "tepat_waktu": 0,
+            "telat_1_hari": 0,
+            "telat_2_hari_atau_lebih": 0,
+            "outstanding": 0,
+            "total": 0,
+            "pencapaian": 0.0,
+            "on_time_diterima": 0,
+            "on_time_outstanding": 0,
+            "late_diterima": 0,
+            "late_outstanding": 0,
+            "on_time_percentage": 0.0,
+            "late_percentage": 0.0,
+            "target_percentage": 90,
+        } for month in range(1, 13)]
+        today = datetime.now().date()
+
+        for arinvoice_id, do_date in delivery_rows:
+            month = do_date.month
+            metric = result[month - 1]
+            metric["target"] += 1
+            tracking = manual_map.get(int(arinvoice_id), {})
+            eta_date = _parse_iso_date(tracking.get("eta_cust"))
+            receive_date = _parse_iso_date(tracking.get("receive_date"))
+
+            if receive_date and eta_date:
+                h_limit = (eta_date - receive_date).days
+                if h_limit > 0:
+                    metric["pengiriman_lebih_cepat"] += 1
+                elif h_limit == 0:
+                    metric["tepat_waktu"] += 1
+                elif h_limit == -1:
+                    metric["telat_1_hari"] += 1
+                else:
+                    metric["telat_2_hari_atau_lebih"] += 1
+                key = "on_time_diterima" if receive_date <= eta_date else "late_diterima"
+                metric[key] += 1
+            else:
+                metric["outstanding"] += 1
+                if eta_date:
+                    key = "late_outstanding" if eta_date < today else "on_time_outstanding"
+                    metric[key] += 1
+
+        for metric in result:
+            target = metric["target"]
+            on_time = metric["on_time_diterima"] + metric["on_time_outstanding"]
+            late = metric["late_diterima"] + metric["late_outstanding"]
+            metric["total"] = (
+                metric["pengiriman_lebih_cepat"]
+                + metric["tepat_waktu"]
+                + metric["telat_1_hari"]
+                + metric["telat_2_hari_atau_lebih"]
+                + metric["outstanding"]
+            )
+            if target:
+                metric["on_time_percentage"] = round(on_time / target * 100, 2)
+                metric["late_percentage"] = round(late / target * 100, 2)
+            if metric["total"]:
+                weighted_score = (
+                    metric["pengiriman_lebih_cepat"] * 125
+                    + metric["tepat_waktu"] * 100
+                    + metric["telat_1_hari"] * 80
+                    + metric["telat_2_hari_atau_lebih"] * 50
+                )
+                metric["pencapaian"] = round(weighted_score / metric["total"], 2)
+
+        return jsonify({
+            "data": result,
+            "year": year,
+            "available_years": available_years,
+            "as_of_date": today.isoformat(),
+        })
+    except (TypeError, ValueError):
+        return jsonify({"message": "Tahun KPI tidak valid."}), 400
+    except Exception as e:
+        print(f"Error api_kpi_time_on_delivery: {e}")
+        return jsonify({
+            "message": "Gagal memuat KPI Time On Delivery.",
+            "data": [],
+            "error": str(e),
+        }), 500
+
+
+@app.route("/api/kpi/delivery-back")
+@jwt_required()
+def api_kpi_delivery_back():
+    if not check_permission("kpi_time_on_delivery"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        current_year = datetime.now().year
+        year = int(request.args.get("year", current_year))
+        if year < 2000 or year > current_year + 1:
+            return jsonify({"message": "Tahun KPI tidak valid."}), 400
+
+        date_from = f"{year:04d}-01-01"
+        date_to = f"{year + 1:04d}-01-01"
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT ar.ARINVOICEID, ar.INVOICEDATE
+            FROM ARINV ar
+            WHERE TRIM(CAST(ar.DELIVERYORDER AS VARCHAR(32))) = '1'
+              AND ar.INVOICEDATE >= ?
+              AND ar.INVOICEDATE < ?
+            ORDER BY ar.INVOICEDATE, ar.ARINVOICEID
+        """, [date_from, date_to])
+        delivery_rows = cur.fetchall()
+        cur.execute("""
+            SELECT DISTINCT EXTRACT(YEAR FROM ar.INVOICEDATE)
+            FROM ARINV ar
+            WHERE TRIM(CAST(ar.DELIVERYORDER AS VARCHAR(32))) = '1'
+              AND ar.INVOICEDATE IS NOT NULL
+            ORDER BY 1 DESC
+        """)
+        available_years = sorted(
+            {int(row[0]) for row in cur.fetchall()} | {year},
+            reverse=True,
+        )
+        con.close()
+
+        manual_map = get_delivery_time_tracking([row[0] for row in delivery_rows])
+        result = [{
+            "month": month,
+            "target": 0,
+            "pengiriman_lebih_cepat": 0,
+            "tepat_waktu": 0,
+            "telat_1_hari": 0,
+            "telat_2_hari_atau_lebih": 0,
+            "outstanding": 0,
+            "total": 0,
+            "pencapaian": 0.0,
+            "on_time_diterima": 0,
+            "on_time_outstanding": 0,
+            "late_diterima": 0,
+            "late_outstanding": 0,
+            "on_time_percentage": 0.0,
+            "late_percentage": 0.0,
+            "target_percentage": 90,
+        } for month in range(1, 13)]
+        today = datetime.now().date()
+
+        for arinvoice_id, do_date in delivery_rows:
+            tracking = manual_map.get(int(arinvoice_id), {})
+            target_date = _parse_iso_date(tracking.get("target_do_kembali"))
+            if not target_date:
+                continue
+
+            metric = result[do_date.month - 1]
+            metric["target"] += 1
+            return_date = _parse_iso_date(tracking.get("do_kembali"))
+
+            if return_date:
+                h_limit = (target_date - return_date).days
+                if h_limit > 0:
+                    metric["pengiriman_lebih_cepat"] += 1
+                elif h_limit == 0:
+                    metric["tepat_waktu"] += 1
+                elif h_limit == -1:
+                    metric["telat_1_hari"] += 1
+                else:
+                    metric["telat_2_hari_atau_lebih"] += 1
+                key = "on_time_diterima" if return_date <= target_date else "late_diterima"
+                metric[key] += 1
+            else:
+                metric["outstanding"] += 1
+                key = "late_outstanding" if target_date < today else "on_time_outstanding"
+                metric[key] += 1
+
+        for metric in result:
+            target = metric["target"]
+            on_time = metric["on_time_diterima"] + metric["on_time_outstanding"]
+            late = metric["late_diterima"] + metric["late_outstanding"]
+            metric["total"] = (
+                metric["pengiriman_lebih_cepat"]
+                + metric["tepat_waktu"]
+                + metric["telat_1_hari"]
+                + metric["telat_2_hari_atau_lebih"]
+                + metric["outstanding"]
+            )
+            if target:
+                metric["on_time_percentage"] = round(on_time / target * 100, 2)
+                metric["late_percentage"] = round(late / target * 100, 2)
+                weighted_score = (
+                    metric["pengiriman_lebih_cepat"] * 125
+                    + metric["tepat_waktu"] * 100
+                    + metric["telat_1_hari"] * 75
+                    + metric["telat_2_hari_atau_lebih"] * 50
+                )
+                metric["pencapaian"] = round(weighted_score / target, 2)
+
+        return jsonify({
+            "data": result,
+            "year": year,
+            "available_years": available_years,
+            "as_of_date": today.isoformat(),
+        })
+    except (TypeError, ValueError):
+        return jsonify({"message": "Tahun KPI tidak valid."}), 400
+    except Exception as e:
+        print(f"Error api_kpi_delivery_back: {e}")
+        return jsonify({
+            "message": "Gagal memuat KPI Delivery Back.",
+            "data": [],
+            "error": str(e),
+        }), 500
+
+
+@app.route("/api/waktu-pengiriman")
+@jwt_required()
+def api_delivery_time():
+    if not check_permission("waktu_pengiriman"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        search = request.args.get("search", "").strip()
+        date_from = request.args.get("date_from", "").strip()
+        date_to = request.args.get("date_to", "").strip()
+        offset = max(int(request.args.get("offset", 0)), 0)
+        limit = min(max(int(request.args.get("limit", 50)), 1), 500)
+
+        where_sql, params = _delivery_time_where(search, date_from, date_to)
+        from_sql = _delivery_time_from()
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute(f"""
+            SELECT FIRST ? SKIP ?
+                ar.ARINVOICEID,
+                ar.INVOICENO,
+                ar.INVOICEDATE,
+                refs.SONO,
+                COALESCE(NULLIF(TRIM(ar.PURCHASEORDERNO), ''), refs.SO_PONO),
+                pd.NAME
+            {from_sql}
+            WHERE {where_sql}
+            ORDER BY ar.INVOICEDATE DESC, ar.INVOICENO DESC
+        """, [limit, offset] + params)
+        rows = cur.fetchall()
+        cur.execute(f"""
+            SELECT COUNT(*)
+            {from_sql}
+            WHERE {where_sql}
+        """, params)
+        total = int((cur.fetchone() or [0])[0] or 0)
+        con.close()
+
+        data = _build_delivery_time_rows(rows)
+        return jsonify({
+            "data": filter_record_columns("waktu_pengiriman", data),
+            "total": total,
+        })
+    except Exception as e:
+        print(f"Error api_delivery_time: {e}")
+        return jsonify({"data": [], "total": 0, "error": str(e)}), 500
+
+
+@app.route("/api/waktu-pengiriman/manual", methods=["POST"])
+@jwt_required()
+def api_delivery_time_manual_save():
+    if not check_permission("waktu_pengiriman"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        payload = request.get_json(silent=True) or {}
+        arinvoice_id = payload.get("arinvoice_id")
+        if not str(arinvoice_id or "").isdigit():
+            return jsonify({"message": "Identitas transaksi pengiriman tidak valid."}), 400
+
+        document_type = str(payload.get("jenis_dokumen") or "").strip()
+        if document_type and document_type not in DELIVERY_DOCUMENT_TYPES:
+            return jsonify({"message": "Jenis dokumen tidak valid."}), 400
+
+        for field in (
+            "etd", "eta_cust", "receive_date",
+            "target_do_kembali", "do_kembali",
+        ):
+            value = str(payload.get(field) or "").strip()
+            if value:
+                try:
+                    datetime.strptime(value, "%Y-%m-%d")
+                except ValueError:
+                    return jsonify({"message": f"Format tanggal {field} tidak valid."}), 400
+
+        for field in (
+            "remarks_do", "expedition", "ket_pengiriman",
+            "resi", "isue_pengiriman",
+        ):
+            if len(str(payload.get(field) or "")) > 1000:
+                return jsonify({"message": "Input manual maksimal 1000 karakter."}), 400
+
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT FIRST 1 INVOICENO
+            FROM ARINV
+            WHERE ARINVOICEID = ?
+              AND TRIM(CAST(DELIVERYORDER AS VARCHAR(32))) = '1'
+        """, [int(arinvoice_id)])
+        valid_row = cur.fetchone()
+        con.close()
+        if not valid_row:
+            return jsonify({"message": "Transaksi pengiriman tidak ditemukan."}), 404
+
+        user = get_current_user()
+        saved = save_delivery_time_tracking(
+            int(arinvoice_id),
+            payload,
+            user.get("username"),
+        )
+        saved["status_pengiriman"] = _delivery_date_status(
+            saved.get("eta_cust"),
+            saved.get("receive_date"),
+        )
+        saved["status_do_kembali"] = _delivery_return_status(
+            saved.get("target_do_kembali"),
+            saved.get("do_kembali"),
+        )
+        audit_current_user(
+            "delivery_time_update",
+            "waktu_pengiriman",
+            f"Update Waktu Pengiriman {str(valid_row[0] or '').strip()}",
+            saved,
+        )
+        return jsonify({"message": "Data Waktu Pengiriman disimpan.", "data": saved})
+    except Exception as e:
+        print(f"Error api_delivery_time_manual_save: {e}")
+        return jsonify({"message": "Gagal menyimpan Waktu Pengiriman.", "error": str(e)}), 500
+
+
 # Invoice penjualan di Easy 6 = ARINV dengan:
 #   DELIVERYORDER = 1   → sudah ada pengiriman (bukan SO langsung)
 #   INVOICETYPE   = 1   → faktur biasa (bukan credit note)
@@ -13296,6 +16598,23 @@ def api_invoice_export():
 
 MKT_PROJECT_PREFIXES = ("A-MKT", "G-MKT", "GTE-MKT")
 GA_PROJECT_PREFIXES = ("A-GAF", "G-GAF")
+HIDDEN_PROJECT_NUMBERS = (
+    "A-MKT-230018",
+    "A-MKT-230019",
+    "A-MKT-240004",
+    "A-MKT-240064",
+    "A-MKT-240085",
+    "A-MKT-250039",
+    "A-MKT-250067",
+    "A-MKT-250072",
+    "A-MKT-250073",
+    "A-MKT-250091",
+    "A-MKT-250094",
+    "A-MKT-250099",
+    "A-MKT-260002",
+    "A-MKT-260015",
+    "A-MKT-260023",
+)
 
 
 def _project_prefix_condition(project_type):
@@ -13317,9 +16636,15 @@ def _detect_project_type(project_no):
     return ""
 
 
-def _project_where(search="", status="active", project_type="", progress=""):
+def _project_where(search="", status="active", project_type="", progress="", contact_name=""):
     conditions = ["1=1"]
     params = []
+    if HIDDEN_PROJECT_NUMBERS:
+        placeholders = ", ".join(["?"] * len(HIDDEN_PROJECT_NUMBERS))
+        conditions.append(
+            f"UPPER(TRIM(CAST(p.PROJECTNO AS VARCHAR(255)))) NOT IN ({placeholders})"
+        )
+        params.extend(HIDDEN_PROJECT_NUMBERS)
     if status == "active":
         conditions.append("COALESCE(p.SUSPENDED, 0) = 0")
     elif status == "suspended":
@@ -13331,11 +16656,14 @@ def _project_where(search="", status="active", project_type="", progress=""):
     if search:
         conditions.append("""(
             LOWER(CAST(p.PROJECTNO AS VARCHAR(255))) CONTAINING LOWER(?)
-            OR LOWER(CAST(p.PROJECTNAME AS VARCHAR(255))) CONTAINING LOWER(?)
-            OR LOWER(CAST(p.CONTACTNAME AS VARCHAR(255))) CONTAINING LOWER(?)
             OR LOWER(CAST(p.DESCRIPTION AS VARCHAR(255))) CONTAINING LOWER(?)
         )""")
-        params.extend([search] * 4)
+        params.extend([search] * 2)
+    if project_type == "mkt" and contact_name:
+        conditions.append(
+            "UPPER(TRIM(CAST(p.CONTACTNAME AS VARCHAR(255)))) = UPPER(TRIM(?))"
+        )
+        params.append(contact_name)
     if progress == "unfinished":
         conditions.append("COALESCE(p.PERCENTCOMPLETED, 0) < 100")
     elif progress == "completed":
@@ -13352,9 +16680,13 @@ def _project_where(search="", status="active", project_type="", progress=""):
     return " AND ".join(conditions), params
 
 
-def _project_summary(cur, search="", status="active", project_type=""):
-    where_sql, params = _project_where(search, status, project_type)
-    suspended_completed_where, suspended_completed_params = _project_where(search, "all", project_type)
+def _project_summary(cur, search="", status="active", project_type="", contact_name=""):
+    where_sql, params = _project_where(
+        search, status, project_type, contact_name=contact_name
+    )
+    suspended_completed_where, suspended_completed_params = _project_where(
+        search, "all", project_type, contact_name=contact_name
+    )
     cur.execute(f"""
         SELECT
             COUNT(*),
@@ -13385,10 +16717,123 @@ def _project_summary(cur, search="", status="active", project_type=""):
     }
 
 
+PROJECT_BUDGET_VALUE_SQL = """
+    COALESCE(pb.OPENINGBALANCE, 0)
+    + COALESCE(pb.PERIOD1, 0) + COALESCE(pb.PERIOD2, 0)
+    + COALESCE(pb.PERIOD3, 0) + COALESCE(pb.PERIOD4, 0)
+    + COALESCE(pb.PERIOD5, 0) + COALESCE(pb.PERIOD6, 0)
+    + COALESCE(pb.PERIOD7, 0) + COALESCE(pb.PERIOD8, 0)
+    + COALESCE(pb.PERIOD9, 0) + COALESCE(pb.PERIOD10, 0)
+    + COALESCE(pb.PERIOD11, 0) + COALESCE(pb.PERIOD12, 0)
+"""
+
+
+def _project_base_metric_map(cur, rows):
+    project_ids = [int(row[0] or 0) for row in rows if int(row[0] or 0)]
+    if not project_ids:
+        return {}
+    placeholders = ", ".join(["?"] * len(project_ids))
+    metrics = {
+        project_id: {
+            "rab": 0.0,
+            "realisasi": 0.0,
+            "profit_rab": 0.0,
+            "profit_realisasi": 0.0,
+            "revenue_rab": 0.0,
+            "revenue_realisasi": 0.0,
+            "discount_realisasi": 0.0,
+            "account_5001_realisasi": 0.0,
+        }
+        for project_id in project_ids
+    }
+
+    cur.execute(f"""
+        SELECT
+            pb.PROJECTID,
+            SUM(CASE
+                WHEN pb.GLACCOUNT STARTING WITH '5.' OR pb.GLACCOUNT STARTING WITH '6.'
+                THEN {PROJECT_BUDGET_VALUE_SQL}
+                ELSE 0
+            END) AS RAB_AMOUNT,
+            SUM(CASE
+                WHEN pb.GLACCOUNT STARTING WITH '4.'
+                  OR pb.GLACCOUNT STARTING WITH '5.'
+                  OR pb.GLACCOUNT STARTING WITH '6.'
+                THEN ABS({PROJECT_BUDGET_VALUE_SQL})
+                ELSE 0
+            END) AS PROFIT_RAB,
+            SUM(CASE
+                WHEN pb.GLACCOUNT = '4.00.00.001'
+                THEN ABS({PROJECT_BUDGET_VALUE_SQL})
+                ELSE 0
+            END) AS REVENUE_RAB
+        FROM PROJECTBUDGET pb
+        WHERE pb.PROJECTID IN ({placeholders})
+        GROUP BY pb.PROJECTID
+    """, project_ids)
+    for row in cur.fetchall():
+        project_id = int(row[0] or 0)
+        metric = metrics.setdefault(project_id, {})
+        metric["rab"] = _to_float(row[1])
+        metric["profit_rab"] = _to_float(row[2])
+        metric["revenue_rab"] = _to_float(row[3])
+
+    cur.execute(f"""
+        SELECT
+            gh.PROJECTID,
+            SUM(CASE
+                WHEN gh.GLACCOUNT STARTING WITH '5.' OR gh.GLACCOUNT STARTING WITH '6.'
+                THEN ABS(gh.BASEAMOUNT)
+                ELSE 0
+            END) AS REALISASI_AMOUNT,
+            SUM(CASE WHEN gh.GLACCOUNT = '4.00.00.001' THEN gh.BASEAMOUNT ELSE 0 END) AS REVENUE_AMOUNT,
+            SUM(CASE WHEN gh.GLACCOUNT = '4.00.00.003' THEN gh.BASEAMOUNT ELSE 0 END) AS DISCOUNT_AMOUNT,
+            SUM(CASE WHEN gh.GLACCOUNT = '5.00.00.001' THEN gh.BASEAMOUNT ELSE 0 END) AS ACCOUNT_5001_AMOUNT
+        FROM GLHIST gh
+        WHERE gh.PROJECTID IN ({placeholders})
+        GROUP BY gh.PROJECTID
+    """, project_ids)
+    for row in cur.fetchall():
+        project_id = int(row[0] or 0)
+        metric = metrics.setdefault(project_id, {})
+        realisasi = _to_float(row[1])
+        revenue = abs(_to_float(row[2]))
+        discount = abs(_to_float(row[3]))
+        account_5001 = abs(_to_float(row[4]))
+        metric["realisasi"] = realisasi
+        metric["revenue_realisasi"] = revenue
+        metric["discount_realisasi"] = discount
+        metric["account_5001_realisasi"] = account_5001
+        metric["profit_realisasi"] = revenue - discount - realisasi
+
+    return metrics
+
+
+def _with_project_base_metrics(rows, base_metrics):
+    enriched_rows = []
+    for row in rows:
+        project_id = int(row[0] or 0)
+        metric = base_metrics.get(project_id, {})
+        enriched_rows.append(tuple(row[:9]) + (
+            metric.get("rab", 0.0),
+            metric.get("realisasi", 0.0),
+            metric.get("profit_rab", 0.0),
+            metric.get("profit_realisasi", 0.0),
+            metric.get("revenue_rab", 0.0),
+            metric.get("revenue_realisasi", 0.0),
+            metric.get("discount_realisasi", 0.0),
+            metric.get("account_5001_realisasi", 0.0),
+        ))
+    return enriched_rows
+
+
 def _build_project_rows(rows, project_metrics=None):
     rows = list(rows)
     project_metrics = project_metrics or {}
     manual_by_project = get_project_manual_realizations_for_projects(
+        str(row[1] or "").strip() for row in rows
+    )
+    remarks_by_project = get_project_remarks_for_projects(
         str(row[1] or "").strip() for row in rows
     )
     data = []
@@ -13409,6 +16854,7 @@ def _build_project_rows(rows, project_metrics=None):
         manual_revenue = manual_map.get(PROJECT_REVENUE_ACCOUNT)
         manual_discount = manual_map.get(PROJECT_DISCOUNT_ACCOUNT)
         manual_account_5001 = manual_map.get("5.00.00.001")
+        remarks = remarks_by_project.get(project_no.upper(), {})
         manual_mkt_expenses = sum(
             abs(_to_float((manual_map.get(row["account_key"]) or {}).get("amount")))
             for row in MKT_PROJECT_MANUAL_EXPENSE_ROWS
@@ -13447,9 +16893,12 @@ def _build_project_rows(rows, project_metrics=None):
 
             for manual_row in MKT_PROJECT_MANUAL_EXPENSE_ROWS:
                 account_key = manual_row["account_key"]
-                actual_values[account_key] = abs(
-                    _to_float((manual_map.get(account_key) or {}).get("amount"))
-                )
+                profit_loss_fee = (metric.get("profit_loss_fee_actual") or {}).get(account_key)
+                actual_values[account_key] = abs(_to_float(
+                    profit_loss_fee
+                    if profit_loss_fee is not None
+                    else (manual_map.get(account_key) or {}).get("amount")
+                ))
 
             profit_rab_amount = _project_profit_loss_formula(rab_values)
             profit_realisasi_amount = _project_profit_loss_formula(actual_values)
@@ -13460,16 +16909,8 @@ def _build_project_rows(rows, project_metrics=None):
                 (profit_realisasi_amount / revenue_realisasi * 100), 2
             ) if revenue_realisasi else 0
 
-            rab = round(sum(
-                abs(_to_float(amount))
-                for account, amount in rab_values.items()
-                if str(account or "").startswith(("5.", "6."))
-            ), 2)
-            realisasi = round(sum(
-                abs(_to_float(amount))
-                for account, amount in actual_values.items()
-                if str(account or "").startswith(("5.", "6."))
-            ), 2)
+            rab = round(_project_display_cost_total(rab_values), 2)
+            realisasi = round(_project_display_cost_total(actual_values), 2)
         else:
             if manual_revenue and abs(revenue_realisasi) <= 0.004:
                 revenue_realisasi = abs(_to_float(manual_revenue.get("amount")))
@@ -13494,9 +16935,14 @@ def _build_project_rows(rows, project_metrics=None):
             "deskripsi": str(row[8] or "").strip(),
             "rab": rab,
             "realisasi": realisasi,
-            "profit_rab": profit_rab,
-            "profit_realisasi": profit_realisasi,
             "selisih": round(rab - realisasi, 2),
+            "value_profit_rab": round(profit_rab_amount, 2),
+            "profit_rab": profit_rab,
+            "value_profit_realisasi": round(profit_realisasi_amount, 2),
+            "profit_realisasi": profit_realisasi,
+            "remarks": remarks.get("remarks", ""),
+            "remarks_updated_by": remarks.get("updated_by", ""),
+            "remarks_updated_at": remarks.get("updated_at", ""),
             "average_pct": round(_to_float(row[6]), 2),
             "status": "Suspended" if suspended else "Aktif",
             "dihentikan": bool(suspended),
@@ -13514,13 +16960,16 @@ def api_project():
         status = request.args.get("status", "active")
         project_type = request.args.get("project_type", "").lower()
         progress = request.args.get("progress", "").lower()
+        contact_name = request.args.get("contact_name", "").strip()
         offset = int(request.args.get("offset", 0))
         limit = int(request.args.get("limit", 50))
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
-        summary = _project_summary(cur, search, status, project_type)
-        where_sql, params = _project_where(search, status, project_type, progress)
+        summary = _project_summary(cur, search, status, project_type, contact_name)
+        where_sql, params = _project_where(
+            search, status, project_type, progress, contact_name
+        )
         cur.execute(f"SELECT COUNT(*) FROM PROJECT p WHERE {where_sql}", params)
         total = int(cur.fetchone()[0] or 0)
         cur.execute(f"""
@@ -13533,96 +16982,13 @@ def api_project():
                 p.FINSHED_DATE,
                 p.PERCENTCOMPLETED,
                 p.SUSPENDED,
-                p.DESCRIPTION,
-                COALESCE((
-                    SELECT SUM(
-                        COALESCE(pb.OPENINGBALANCE, 0)
-                        + COALESCE(pb.PERIOD1, 0) + COALESCE(pb.PERIOD2, 0)
-                        + COALESCE(pb.PERIOD3, 0) + COALESCE(pb.PERIOD4, 0)
-                        + COALESCE(pb.PERIOD5, 0) + COALESCE(pb.PERIOD6, 0)
-                        + COALESCE(pb.PERIOD7, 0) + COALESCE(pb.PERIOD8, 0)
-                        + COALESCE(pb.PERIOD9, 0) + COALESCE(pb.PERIOD10, 0)
-                        + COALESCE(pb.PERIOD11, 0) + COALESCE(pb.PERIOD12, 0)
-                    )
-                    FROM PROJECTBUDGET pb
-                    WHERE pb.PROJECTID = p.PROJECTID
-                      AND (pb.GLACCOUNT STARTING WITH '5.' OR pb.GLACCOUNT STARTING WITH '6.')
-                ), 0) AS RAB_AMOUNT,
-                COALESCE((
-                    SELECT SUM(ABS(gh.BASEAMOUNT))
-                    FROM GLHIST gh
-                    WHERE gh.PROJECTID = p.PROJECTID
-                      AND (gh.GLACCOUNT STARTING WITH '5.' OR gh.GLACCOUNT STARTING WITH '6.')
-                ), 0) AS REALISASI_AMOUNT,
-                COALESCE((
-                    SELECT SUM(ABS(
-                        COALESCE(pb.OPENINGBALANCE, 0)
-                        + COALESCE(pb.PERIOD1, 0) + COALESCE(pb.PERIOD2, 0)
-                        + COALESCE(pb.PERIOD3, 0) + COALESCE(pb.PERIOD4, 0)
-                        + COALESCE(pb.PERIOD5, 0) + COALESCE(pb.PERIOD6, 0)
-                        + COALESCE(pb.PERIOD7, 0) + COALESCE(pb.PERIOD8, 0)
-                        + COALESCE(pb.PERIOD9, 0) + COALESCE(pb.PERIOD10, 0)
-                        + COALESCE(pb.PERIOD11, 0) + COALESCE(pb.PERIOD12, 0)
-                    ))
-                    FROM PROJECTBUDGET pb
-                    WHERE pb.PROJECTID = p.PROJECTID
-                      AND (pb.GLACCOUNT STARTING WITH '4.' OR pb.GLACCOUNT STARTING WITH '5.' OR pb.GLACCOUNT STARTING WITH '6.')
-                ), 0) AS PROFIT_RAB,
-                ABS(COALESCE((
-                    SELECT SUM(gh.BASEAMOUNT)
-                    FROM GLHIST gh
-                    WHERE gh.PROJECTID = p.PROJECTID
-                      AND gh.GLACCOUNT = '4.00.00.001'
-                ), 0))
-                - ABS(COALESCE((
-                    SELECT SUM(gh.BASEAMOUNT)
-                    FROM GLHIST gh
-                    WHERE gh.PROJECTID = p.PROJECTID
-                      AND gh.GLACCOUNT = '4.00.00.003'
-                ), 0))
-                - COALESCE((
-                    SELECT SUM(ABS(gh.BASEAMOUNT))
-                    FROM GLHIST gh
-                    WHERE gh.PROJECTID = p.PROJECTID
-                      AND (gh.GLACCOUNT STARTING WITH '5.' OR gh.GLACCOUNT STARTING WITH '6.')
-                ), 0) AS PROFIT_REALISASI,
-                COALESCE((
-                    SELECT SUM(ABS(
-                        COALESCE(pb.OPENINGBALANCE, 0)
-                        + COALESCE(pb.PERIOD1, 0) + COALESCE(pb.PERIOD2, 0)
-                        + COALESCE(pb.PERIOD3, 0) + COALESCE(pb.PERIOD4, 0)
-                        + COALESCE(pb.PERIOD5, 0) + COALESCE(pb.PERIOD6, 0)
-                        + COALESCE(pb.PERIOD7, 0) + COALESCE(pb.PERIOD8, 0)
-                        + COALESCE(pb.PERIOD9, 0) + COALESCE(pb.PERIOD10, 0)
-                        + COALESCE(pb.PERIOD11, 0) + COALESCE(pb.PERIOD12, 0)
-                    ))
-                    FROM PROJECTBUDGET pb
-                    WHERE pb.PROJECTID = p.PROJECTID
-                      AND pb.GLACCOUNT = '4.00.00.001'
-                ), 0) AS REVENUE_RAB,
-                ABS(COALESCE((
-                    SELECT SUM(gh.BASEAMOUNT)
-                    FROM GLHIST gh
-                    WHERE gh.PROJECTID = p.PROJECTID
-                      AND gh.GLACCOUNT = '4.00.00.001'
-                ), 0)) AS REVENUE_REALISASI,
-                ABS(COALESCE((
-                    SELECT SUM(gh.BASEAMOUNT)
-                    FROM GLHIST gh
-                    WHERE gh.PROJECTID = p.PROJECTID
-                      AND gh.GLACCOUNT = '4.00.00.003'
-                ), 0)) AS DISCOUNT_REALISASI,
-                ABS(COALESCE((
-                    SELECT SUM(gh.BASEAMOUNT)
-                    FROM GLHIST gh
-                    WHERE gh.PROJECTID = p.PROJECTID
-                      AND gh.GLACCOUNT = '5.00.00.001'
-                ), 0)) AS ACCOUNT_5001_REALISASI
+                p.DESCRIPTION
             FROM PROJECT p
             WHERE {where_sql}
             ORDER BY COALESCE(p.SUSPENDED, 0), p.PROJECTNO
         """, [limit, offset] + params)
         rows = cur.fetchall()
+        rows = _with_project_base_metrics(rows, _project_base_metric_map(cur, rows))
         project_metrics = _build_project_metric_map(cur, rows)
         con.close()
         return jsonify({"data": filter_record_columns("project", _build_project_rows(rows, project_metrics)), "total": total, "summary": summary})
@@ -13641,9 +17007,12 @@ def api_project_export():
         status = request.args.get("status", "active")
         project_type = request.args.get("project_type", "").lower()
         progress = request.args.get("progress", "").lower()
+        contact_name = request.args.get("contact_name", "").strip()
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
-        where_sql, params = _project_where(search, status, project_type, progress)
+        where_sql, params = _project_where(
+            search, status, project_type, progress, contact_name
+        )
         cur.execute(f"""
             SELECT
                 p.PROJECTID,
@@ -13654,96 +17023,13 @@ def api_project_export():
                 p.FINSHED_DATE,
                 p.PERCENTCOMPLETED,
                 p.SUSPENDED,
-                p.DESCRIPTION,
-                COALESCE((
-                    SELECT SUM(
-                        COALESCE(pb.OPENINGBALANCE, 0)
-                        + COALESCE(pb.PERIOD1, 0) + COALESCE(pb.PERIOD2, 0)
-                        + COALESCE(pb.PERIOD3, 0) + COALESCE(pb.PERIOD4, 0)
-                        + COALESCE(pb.PERIOD5, 0) + COALESCE(pb.PERIOD6, 0)
-                        + COALESCE(pb.PERIOD7, 0) + COALESCE(pb.PERIOD8, 0)
-                        + COALESCE(pb.PERIOD9, 0) + COALESCE(pb.PERIOD10, 0)
-                        + COALESCE(pb.PERIOD11, 0) + COALESCE(pb.PERIOD12, 0)
-                    )
-                    FROM PROJECTBUDGET pb
-                    WHERE pb.PROJECTID = p.PROJECTID
-                      AND (pb.GLACCOUNT STARTING WITH '5.' OR pb.GLACCOUNT STARTING WITH '6.')
-                ), 0) AS RAB_AMOUNT,
-                COALESCE((
-                    SELECT SUM(ABS(gh.BASEAMOUNT))
-                    FROM GLHIST gh
-                    WHERE gh.PROJECTID = p.PROJECTID
-                      AND (gh.GLACCOUNT STARTING WITH '5.' OR gh.GLACCOUNT STARTING WITH '6.')
-                ), 0) AS REALISASI_AMOUNT,
-                COALESCE((
-                    SELECT SUM(ABS(
-                        COALESCE(pb.OPENINGBALANCE, 0)
-                        + COALESCE(pb.PERIOD1, 0) + COALESCE(pb.PERIOD2, 0)
-                        + COALESCE(pb.PERIOD3, 0) + COALESCE(pb.PERIOD4, 0)
-                        + COALESCE(pb.PERIOD5, 0) + COALESCE(pb.PERIOD6, 0)
-                        + COALESCE(pb.PERIOD7, 0) + COALESCE(pb.PERIOD8, 0)
-                        + COALESCE(pb.PERIOD9, 0) + COALESCE(pb.PERIOD10, 0)
-                        + COALESCE(pb.PERIOD11, 0) + COALESCE(pb.PERIOD12, 0)
-                    ))
-                    FROM PROJECTBUDGET pb
-                    WHERE pb.PROJECTID = p.PROJECTID
-                      AND (pb.GLACCOUNT STARTING WITH '4.' OR pb.GLACCOUNT STARTING WITH '5.' OR pb.GLACCOUNT STARTING WITH '6.')
-                ), 0) AS PROFIT_RAB,
-                ABS(COALESCE((
-                    SELECT SUM(gh.BASEAMOUNT)
-                    FROM GLHIST gh
-                    WHERE gh.PROJECTID = p.PROJECTID
-                      AND gh.GLACCOUNT = '4.00.00.001'
-                ), 0))
-                - ABS(COALESCE((
-                    SELECT SUM(gh.BASEAMOUNT)
-                    FROM GLHIST gh
-                    WHERE gh.PROJECTID = p.PROJECTID
-                      AND gh.GLACCOUNT = '4.00.00.003'
-                ), 0))
-                - COALESCE((
-                    SELECT SUM(ABS(gh.BASEAMOUNT))
-                    FROM GLHIST gh
-                    WHERE gh.PROJECTID = p.PROJECTID
-                      AND (gh.GLACCOUNT STARTING WITH '5.' OR gh.GLACCOUNT STARTING WITH '6.')
-                ), 0) AS PROFIT_REALISASI,
-                COALESCE((
-                    SELECT SUM(ABS(
-                        COALESCE(pb.OPENINGBALANCE, 0)
-                        + COALESCE(pb.PERIOD1, 0) + COALESCE(pb.PERIOD2, 0)
-                        + COALESCE(pb.PERIOD3, 0) + COALESCE(pb.PERIOD4, 0)
-                        + COALESCE(pb.PERIOD5, 0) + COALESCE(pb.PERIOD6, 0)
-                        + COALESCE(pb.PERIOD7, 0) + COALESCE(pb.PERIOD8, 0)
-                        + COALESCE(pb.PERIOD9, 0) + COALESCE(pb.PERIOD10, 0)
-                        + COALESCE(pb.PERIOD11, 0) + COALESCE(pb.PERIOD12, 0)
-                    ))
-                    FROM PROJECTBUDGET pb
-                    WHERE pb.PROJECTID = p.PROJECTID
-                      AND pb.GLACCOUNT = '4.00.00.001'
-                ), 0) AS REVENUE_RAB,
-                ABS(COALESCE((
-                    SELECT SUM(gh.BASEAMOUNT)
-                    FROM GLHIST gh
-                    WHERE gh.PROJECTID = p.PROJECTID
-                      AND gh.GLACCOUNT = '4.00.00.001'
-                ), 0)) AS REVENUE_REALISASI,
-                ABS(COALESCE((
-                    SELECT SUM(gh.BASEAMOUNT)
-                    FROM GLHIST gh
-                    WHERE gh.PROJECTID = p.PROJECTID
-                      AND gh.GLACCOUNT = '4.00.00.003'
-                ), 0)) AS DISCOUNT_REALISASI,
-                ABS(COALESCE((
-                    SELECT SUM(gh.BASEAMOUNT)
-                    FROM GLHIST gh
-                    WHERE gh.PROJECTID = p.PROJECTID
-                      AND gh.GLACCOUNT = '5.00.00.001'
-                ), 0)) AS ACCOUNT_5001_REALISASI
+                p.DESCRIPTION
             FROM PROJECT p
             WHERE {where_sql}
             ORDER BY COALESCE(p.SUSPENDED, 0), p.PROJECTNO
         """, params)
         rows = cur.fetchall()
+        rows = _with_project_base_metrics(rows, _project_base_metric_map(cur, rows))
         project_metrics = _build_project_metric_map(cur, rows)
         con.close()
         data = filter_record_columns("project", _build_project_rows(rows, project_metrics))
@@ -13788,6 +17074,30 @@ def api_project_options():
         return jsonify({"data": [], "error": str(e)})
 
 
+@app.route("/api/project/contact-options")
+@jwt_required()
+def api_project_contact_options():
+    if not check_permission("project"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        where_sql, params = _project_where("", "all", "mkt")
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute(f"""
+            SELECT DISTINCT TRIM(CAST(p.CONTACTNAME AS VARCHAR(255)))
+            FROM PROJECT p
+            WHERE {where_sql}
+              AND NULLIF(TRIM(CAST(p.CONTACTNAME AS VARCHAR(255))), '') IS NOT NULL
+            ORDER BY 1
+        """, params)
+        data = [str(row[0] or "").strip() for row in cur.fetchall()]
+        con.close()
+        return jsonify({"data": data})
+    except Exception as e:
+        print(f"Error api_project_contact_options: {e}")
+        return jsonify({"data": [], "error": str(e)}), 500
+
+
 def _project_detail_where(search="", date_from="", date_to="", project_type="", project_no="", account_no=""):
     conditions = [
         "p.PROJECTNO IS NOT NULL",
@@ -13804,6 +17114,10 @@ def _project_detail_where(search="", date_from="", date_to="", project_type="", 
             OR TRIM(CAST(gh.GLACCOUNT AS VARCHAR(255))) STARTING WITH '2.'
             OR TRIM(CAST(gh.GLACCOUNT AS VARCHAR(255))) STARTING WITH '3.'
         )""")
+    elif project_type == "ga":
+        account_placeholders = ", ".join(["?"] * len(GA_PROJECT_REPORT_ACCOUNTS))
+        conditions.append(f"TRIM(CAST(gh.GLACCOUNT AS VARCHAR(255))) IN ({account_placeholders})")
+        params.extend(GA_PROJECT_REPORT_ACCOUNTS)
     if project_no:
         conditions.append("UPPER(TRIM(p.PROJECTNO)) = UPPER(TRIM(?))")
         params.append(project_no)
@@ -13865,6 +17179,363 @@ def _build_project_detail_rows(rows):
     return data
 
 
+def _project_detail_match_virtual_row(row, search="", date_from="", date_to="", project_no="", account_no=""):
+    if project_no and str(row.get("no_project") or "").strip().upper() != str(project_no or "").strip().upper():
+        return False
+    if account_no and str(row.get("no_akun") or "").strip() != str(account_no or "").strip():
+        return False
+    tanggal = str(row.get("tanggal") or "").strip()
+    if date_from and tanggal and tanggal < date_from:
+        return False
+    if date_to and tanggal and tanggal > date_to:
+        return False
+    if search:
+        needle = str(search or "").strip().lower()
+        haystack = " ".join(str(row.get(key) or "") for key in (
+            "no_project", "nama_project", "no_akun", "nama_akun", "sumber",
+            "tipe_transaksi", "no_dokumen", "deskripsi",
+        )).lower()
+        if needle not in haystack:
+            return False
+    return True
+
+
+def _project_detail_account_has_easy_rows(cur, project_id, account_no):
+    cur.execute("""
+        SELECT FIRST 1 1
+        FROM GLHIST gh
+        WHERE gh.PROJECTID = ?
+          AND TRIM(CAST(gh.GLACCOUNT AS VARCHAR(255))) = ?
+          AND ABS(COALESCE(gh.BASEAMOUNT, 0)) > 0.004
+    """, [project_id, account_no])
+    return cur.fetchone() is not None
+
+
+def _project_detail_hpp_rows(cur, project_id, project_no, project_name, search="", date_from="", date_to="", account_no=""):
+    if account_no and account_no != PROJECT_HPP_ACCOUNT:
+        return []
+
+    project_filter = """
+        (
+            det.PROJECTID = ?
+            OR podet.PROJECTID = ?
+            OR rd.PROJECTID = ?
+        )
+    """
+    project_params = [project_id, project_id, project_id]
+    amount_expr = """
+        COALESCE(det.QUANTITY, 0) * COALESCE(det.UNITPRICE, 0) *
+        (1 - (
+            CASE
+                WHEN TRIM(CAST(det.ITEMDISCPC AS VARCHAR(32))) = '' THEN 0
+                ELSE COALESCE(CAST(det.ITEMDISCPC AS DOUBLE PRECISION), 0)
+            END
+        ) / 100)
+    """
+    conditions = [
+        "det.ITEMNO IS NOT NULL",
+        PROJECT_HPP_ITEM_ACCOUNT_CONDITION,
+        "NOT UPPER(TRIM(COALESCE(po.PONO, ''))) STARTING WITH 'AI-A'",
+        project_filter,
+    ]
+    params = list(project_params)
+    if date_from:
+        conditions.append("ai.INVOICEDATE >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("ai.INVOICEDATE <= ?")
+        params.append(date_to)
+    if search:
+        conditions.append("""(
+            LOWER(CAST(ai.INVOICENO AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(po.PONO AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(rq.REQNO AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(det.ITEMNO AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(COALESCE(NULLIF(TRIM(det.ITEMOVDESC), ''), i.ITEMDESCRIPTION) AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(pd.NAME AS VARCHAR(255))) CONTAINING LOWER(?)
+        )""")
+        params.extend([search] * 6)
+
+    cur.execute(f"""
+        SELECT
+            ai.INVOICEDATE,
+            ai.INVOICENO,
+            pd.NAME,
+            po.PONO,
+            rq.REQNO,
+            COALESCE(NULLIF(TRIM(det.ITEMRESERVED9), ''), NULLIF(TRIM(podet.ITEMRESERVED9), ''), NULLIF(TRIM(rd.ITEMRESERVED9), '')),
+            det.ITEMNO,
+            COALESCE(NULLIF(TRIM(det.ITEMOVDESC), ''), i.ITEMDESCRIPTION),
+            det.QUANTITY,
+            det.ITEMUNIT,
+            {amount_expr}
+        FROM APINV ai
+        JOIN APITMDET det ON det.APINVOICEID = ai.APINVOICEID
+        LEFT JOIN PERSONDATA pd ON pd.ID = ai.VENDORID
+        LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
+        LEFT JOIN PO po ON po.POID = det.POID
+        LEFT JOIN PODET podet ON podet.POID = det.POID AND podet.SEQ = det.POSEQ
+        LEFT JOIN REQUISITION rq ON rq.REQID = podet.REQID
+        LEFT JOIN REQUISITIONDET rd ON rd.REQID = podet.REQID AND rd.SEQ = podet.REQSEQ
+        WHERE {" AND ".join(conditions)}
+        ORDER BY ai.INVOICEDATE DESC, ai.INVOICENO, det.SEQ
+    """, params)
+    rows = []
+    for row in cur.fetchall():
+        qty = _to_float(row[8])
+        unit = str(row[9] or "").strip()
+        rows.append({
+            "tanggal": str(row[0]) if row[0] else "",
+            "no_project": project_no,
+            "nama_project": project_name,
+            "no_akun": PROJECT_HPP_ACCOUNT,
+            "nama_akun": "HPP Pembelian",
+            "sumber": "HPP",
+            "tipe_transaksi": "HPP Item",
+            "no_dokumen": str(row[1] or "").strip(),
+            "deskripsi": " | ".join(part for part in [
+                str(row[7] or "").strip(),
+                f"Item {str(row[6] or '').strip()}" if row[6] else "",
+                f"Qty {qty:g} {unit}".strip() if qty else "",
+                f"PO {str(row[3] or '').strip()}" if row[3] else "",
+                f"PR {str(row[4] or '').strip()}" if row[4] else "",
+                f"SO {str(row[5] or '').strip()}" if row[5] else "",
+                f"Vendor {str(row[2] or '').strip()}" if row[2] else "",
+            ] if part),
+            "nilai": round(_to_float(row[10]), 2),
+        })
+
+    add_cost_conditions = [
+        "COALESCE(po.FREIGHT, 0) <> 0",
+        "(podet.PROJECTID = ? OR rd.PROJECTID = ?)",
+    ]
+    add_cost_params = [project_id, project_id]
+    if date_from:
+        add_cost_conditions.append("po.PODATE >= ?")
+        add_cost_params.append(date_from)
+    if date_to:
+        add_cost_conditions.append("po.PODATE <= ?")
+        add_cost_params.append(date_to)
+    if search:
+        add_cost_conditions.append("""(
+            LOWER(CAST(po.PONO AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(pd.NAME AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(rq.REQNO AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(rd.ITEMRESERVED9 AS VARCHAR(255))) CONTAINING LOWER(?)
+        )""")
+        add_cost_params.extend([search] * 4)
+    cur.execute(f"""
+        SELECT
+            po.PODATE,
+            po.PONO,
+            pd.NAME,
+            MAX(rq.REQNO),
+            MAX(COALESCE(NULLIF(TRIM(rd.ITEMRESERVED9), ''), '')),
+            COALESCE(po.FREIGHT, 0)
+        FROM PO po
+        LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
+        LEFT JOIN PODET podet ON podet.POID = po.POID
+        LEFT JOIN REQUISITION rq ON rq.REQID = podet.REQID
+        LEFT JOIN REQUISITIONDET rd ON rd.REQID = podet.REQID AND rd.SEQ = podet.REQSEQ
+        WHERE {" AND ".join(add_cost_conditions)}
+        GROUP BY po.PODATE, po.PONO, pd.NAME, po.FREIGHT
+        ORDER BY po.PODATE DESC, po.PONO
+    """, add_cost_params)
+    for row in cur.fetchall():
+        rows.append({
+            "tanggal": str(row[0]) if row[0] else "",
+            "no_project": project_no,
+            "nama_project": project_name,
+            "no_akun": PROJECT_HPP_ACCOUNT,
+            "nama_akun": "HPP Pembelian",
+            "sumber": "HPP",
+            "tipe_transaksi": "Add Cost",
+            "no_dokumen": str(row[1] or "").strip(),
+            "deskripsi": " | ".join(part for part in [
+                "Add Cost Pembelian",
+                f"PR {str(row[3] or '').strip()}" if row[3] else "",
+                f"SO {str(row[4] or '').strip()}" if row[4] else "",
+                f"Vendor {str(row[2] or '').strip()}" if row[2] else "",
+            ] if part),
+            "nilai": round(_to_float(row[5]), 2),
+        })
+    return rows
+
+
+def _project_detail_virtual_rows(cur, project_rows, search="", date_from="", date_to="", project_type="", project_no="", account_no=""):
+    virtual_rows = []
+    manual_by_project = get_project_manual_realizations_for_projects(
+        str(row[1] or "").strip() for row in project_rows
+    )
+    account_names = {
+        row["account_key"]: row["account_name"]
+        for row in MKT_PROJECT_MANUAL_EXPENSE_ROWS
+    }
+    account_names.update({
+        PROJECT_REVENUE_ACCOUNT: "Pendapatan Usaha",
+        PROJECT_DISCOUNT_ACCOUNT: "Diskon Penjualan",
+        PROJECT_HPP_ACCOUNT: "HPP Pembelian",
+    })
+
+    for project in project_rows:
+        project_id = int(project[0] or 0)
+        project_no_value = str(project[1] or "").strip()
+        project_name = str(project[2] or "").strip()
+        selected_project_type = _detect_project_type(project_no_value)
+        if project_type and selected_project_type and selected_project_type != project_type:
+            continue
+        if selected_project_type == "ga":
+            continue
+        manual_map = manual_by_project.get(project_no_value.upper(), {})
+
+        if selected_project_type == "mkt":
+            virtual_rows.extend(_project_detail_hpp_rows(
+                cur, project_id, project_no_value, project_name, search, date_from, date_to, account_no
+            ))
+            fee_realizations, _references = _project_profit_loss_fee_realizations(cur, project_name)
+            for manual_row in MKT_PROJECT_MANUAL_EXPENSE_ROWS:
+                account_key = manual_row["account_key"]
+                if account_no and manual_row["account_no"] != account_no and account_key != account_no:
+                    continue
+                fee = fee_realizations.get(account_key)
+                if not fee:
+                    continue
+                for detail in fee.get("details") or []:
+                    virtual_row = {
+                        "tanggal": detail.get("tanggal") or "",
+                        "no_project": project_no_value,
+                        "nama_project": project_name,
+                        "no_akun": manual_row["account_no"],
+                        "nama_akun": manual_row["account_name"],
+                        "sumber": "Profit & Loss",
+                        "tipe_transaksi": account_key.rsplit("-", 1)[-1],
+                        "no_dokumen": detail.get("no_transaksi") or "",
+                        "deskripsi": " | ".join(part for part in [
+                            f"SO {detail.get('source_reference')}" if detail.get("source_reference") else "",
+                            f"Part {detail.get('part_number')}" if detail.get("part_number") else "",
+                            f"Persentase {detail.get('persentase')}" if detail.get("persentase") else "",
+                            f"Amount asal {detail.get('amount_asal')}" if detail.get("amount_asal") else "",
+                        ] if part),
+                        "nilai": round(_to_float(detail.get("nilai_fee")), 2),
+                    }
+                    if _project_detail_match_virtual_row(virtual_row, search, date_from, date_to, project_no, account_no):
+                        virtual_rows.append(virtual_row)
+
+        for manual_account, manual in manual_map.items():
+            if account_no:
+                display_account = next((
+                    item["account_no"] for item in MKT_PROJECT_MANUAL_EXPENSE_ROWS
+                    if item["account_key"] == manual_account
+                ), manual_account)
+                if account_no not in (manual_account, display_account):
+                    continue
+            if selected_project_type == "mkt" and manual_account in (row["account_key"] for row in MKT_PROJECT_MANUAL_EXPENSE_ROWS):
+                fee_realizations, _references = _project_profit_loss_fee_realizations(cur, project_name)
+                if fee_realizations.get(manual_account):
+                    continue
+            elif _project_detail_account_has_easy_rows(cur, project_id, manual_account):
+                continue
+
+            manual_row = {
+                "tanggal": manual.get("updated_at", "")[:10],
+                "no_project": project_no_value,
+                "nama_project": project_name,
+                "no_akun": next((
+                    item["account_no"] for item in MKT_PROJECT_MANUAL_EXPENSE_ROWS
+                    if item["account_key"] == manual_account
+                ), manual_account),
+                "nama_akun": account_names.get(manual_account, manual_account),
+                "sumber": "Manual Dashboard",
+                "tipe_transaksi": "Manual",
+                "no_dokumen": f"MANUAL-{project_no_value}",
+                "deskripsi": manual.get("note") or "Input realisasi manual dari Laporan Project",
+                "nilai": round(abs(_to_float(manual.get("amount"))), 2),
+            }
+            if _project_detail_match_virtual_row(manual_row, search, date_from, date_to, project_no, account_no):
+                virtual_rows.append(manual_row)
+
+    return virtual_rows
+
+
+def _project_detail_total_nilai(data, project_type=""):
+    if str(project_type or "").strip().lower() == "ga":
+        account_totals = {}
+        for row in data:
+            key = (
+                str(row.get("no_project") or "").strip().upper(),
+                str(row.get("no_akun") or "").strip(),
+            )
+            account_totals[key] = account_totals.get(key, 0.0) + _to_float(row.get("nilai"))
+        return round(sum(abs(amount) for amount in account_totals.values()), 2)
+    return round(sum(_to_float(row.get("nilai")) for row in data), 2)
+
+
+def _project_detail_candidate_projects(cur, gl_rows, project_type="", project_no=""):
+    projects = {}
+    for row in gl_rows:
+        project_id = int(row[12] or 0) if len(row) > 12 else 0
+        project_no_value = str(row[1] or "").strip()
+        if project_id and project_no_value:
+            projects[project_id] = (project_id, project_no_value, str(row[2] or "").strip())
+    if project_no:
+        cur.execute("""
+            SELECT p.PROJECTID, p.PROJECTNO, p.PROJECTNAME
+            FROM PROJECT p
+            WHERE UPPER(TRIM(p.PROJECTNO)) = UPPER(TRIM(?))
+        """, [project_no])
+        for row in cur.fetchall():
+            project_id = int(row[0] or 0)
+            if project_id:
+                projects[project_id] = (
+                    project_id,
+                    str(row[1] or "").strip(),
+                    str(row[2] or "").strip(),
+                )
+    elif not gl_rows:
+        where_sql, params = _project_where("", "all", project_type)
+        cur.execute(f"""
+            SELECT FIRST 100
+                p.PROJECTID,
+                p.PROJECTNO,
+                p.PROJECTNAME
+            FROM PROJECT p
+            WHERE {where_sql}
+            ORDER BY p.PROJECTNO
+        """, params)
+        for row in cur.fetchall():
+            project_id = int(row[0] or 0)
+            if project_id:
+                projects[project_id] = (
+                    project_id,
+                    str(row[1] or "").strip(),
+                    str(row[2] or "").strip(),
+                )
+    return list(projects.values())
+
+
+def _project_detail_sort_key(row):
+    tanggal = str(row.get("tanggal") or "")
+    return (tanggal, str(row.get("no_dokumen") or ""), str(row.get("deskripsi") or ""))
+
+
+def _project_detail_replace_hpp_gl_rows(data, virtual_rows):
+    hpp_projects = {
+        str(row.get("no_project") or "").strip().upper()
+        for row in virtual_rows
+        if row.get("sumber") == "HPP" and str(row.get("no_akun") or "").strip() == PROJECT_HPP_ACCOUNT
+    }
+    if not hpp_projects:
+        return data
+    return [
+        row for row in data
+        if not (
+            str(row.get("no_project") or "").strip().upper() in hpp_projects
+            and str(row.get("no_akun") or "").strip() == PROJECT_HPP_ACCOUNT
+            and row.get("sumber") not in ("HPP", "Manual Dashboard", "Profit & Loss")
+        )
+    ]
+
+
 @app.route("/api/project/detail")
 @jwt_required()
 def api_project_detail():
@@ -13884,18 +17555,7 @@ def api_project_detail():
         cur = con.cursor()
         where_sql, params = _project_detail_where(search, date_from, date_to, project_type, project_no, account_no)
         cur.execute(f"""
-            SELECT COUNT(*), COALESCE(SUM(gh.BASEAMOUNT), 0)
-            FROM GLHIST gh
-            JOIN PROJECT p ON p.PROJECTID = gh.PROJECTID
-            LEFT JOIN GLACCNT ga ON ga.GLACCOUNT = gh.GLACCOUNT
-            WHERE {where_sql}
-        """, params)
-        total_row = cur.fetchone()
-        total = int(total_row[0] or 0)
-        nilai = round(_to_float(total_row[1]), 2)
-
-        cur.execute(f"""
-            SELECT FIRST ? SKIP ?
+            SELECT
                 gh.TRANSDATE,
                 p.PROJECTNO,
                 p.PROJECTNAME,
@@ -13919,17 +17579,29 @@ def api_project_detail():
                         WHERE ai.APINVOICEID = gh.INVOICEID
                     )
                     ELSE NULL
-                END AS DOCNO
+                END AS DOCNO,
+                p.PROJECTID
             FROM GLHIST gh
             JOIN PROJECT p ON p.PROJECTID = gh.PROJECTID
             LEFT JOIN GLACCNT ga ON ga.GLACCOUNT = gh.GLACCOUNT
             WHERE {where_sql}
             ORDER BY gh.TRANSDATE DESC, gh.GLHISTID DESC
-        """, [limit, offset] + params)
+        """, params)
         rows = cur.fetchall()
+        data = _build_project_detail_rows(rows)
+        project_rows = _project_detail_candidate_projects(cur, rows, project_type, project_no)
+        virtual_rows = _project_detail_virtual_rows(
+            cur, project_rows, search, date_from, date_to, project_type, project_no, account_no
+        )
+        data = _project_detail_replace_hpp_gl_rows(data, virtual_rows)
+        data.extend(virtual_rows)
         con.close()
+        data.sort(key=_project_detail_sort_key, reverse=True)
+        total = len(data)
+        nilai = _project_detail_total_nilai(data, project_type)
+        page_data = data[offset:offset + limit]
         return jsonify({
-            "data": filter_record_columns("project_detail", _build_project_detail_rows(rows)),
+            "data": filter_record_columns("project_detail", page_data),
             "total": total,
             "summary": {"total_transaksi": total, "nilai": nilai},
         })
@@ -13978,7 +17650,8 @@ def api_project_detail_export():
                         WHERE ai.APINVOICEID = gh.INVOICEID
                     )
                     ELSE NULL
-                END AS DOCNO
+                END AS DOCNO,
+                p.PROJECTID
             FROM GLHIST gh
             JOIN PROJECT p ON p.PROJECTID = gh.PROJECTID
             LEFT JOIN GLACCNT ga ON ga.GLACCOUNT = gh.GLACCOUNT
@@ -13986,8 +17659,16 @@ def api_project_detail_export():
             ORDER BY gh.TRANSDATE DESC, gh.GLHISTID DESC
         """, params)
         rows = cur.fetchall()
+        data = _build_project_detail_rows(rows)
+        project_rows = _project_detail_candidate_projects(cur, rows, project_type, project_no)
+        virtual_rows = _project_detail_virtual_rows(
+            cur, project_rows, search, date_from, date_to, project_type, project_no, account_no
+        )
+        data = _project_detail_replace_hpp_gl_rows(data, virtual_rows)
+        data.extend(virtual_rows)
         con.close()
-        data = filter_record_columns("project_detail", _build_project_detail_rows(rows))
+        data.sort(key=_project_detail_sort_key, reverse=True)
+        data = filter_record_columns("project_detail", data)
         return jsonify({"data": data, "total": len(data)})
     except Exception as e:
         print(f"Error api_project_detail_export: {e}")
@@ -14006,6 +17687,49 @@ def _project_duration_days(start_date, end_date):
 def _project_customer_name(description):
     text = str(description or "").strip()
     return text.split(",", 1)[0].strip() if text else ""
+
+
+def _project_sales_order_references(project_name):
+    """Ambil referensi AI-PP unik dari nama project dengan urutan tetap."""
+    references = []
+    seen = set()
+    for match in re.finditer(r"\bAI-PP-\d+\b", str(project_name or ""), flags=re.IGNORECASE):
+        reference = match.group(0).upper()
+        if reference not in seen:
+            seen.add(reference)
+            references.append(reference)
+    return references
+
+
+def _project_profit_loss_fee_realizations(cur, project_name):
+    """Akumulasi CF/MF Profit & Loss untuk seluruh AI-PP dalam nama project."""
+    references = _project_sales_order_references(project_name)
+    if not references:
+        return {}, []
+
+    cf_map = _profit_loss_cf_map(cur, references)
+    mf_map = _profit_loss_mf_map(cur, references)
+    result = {}
+    for account_key, fee_map in (
+        ("6.00.00.003-CF", cf_map),
+        ("6.00.00.003-MF", mf_map),
+    ):
+        matched_references = [reference for reference in references if fee_map.get(reference)]
+        if not matched_references:
+            continue
+        result[account_key] = {
+            "amount": round(sum(
+                _to_float((fee_map.get(reference) or {}).get("amount"))
+                for reference in matched_references
+            ), 2),
+            "references": matched_references,
+            "details": [
+                {**detail, "source_reference": reference}
+                for reference in matched_references
+                for detail in (fee_map.get(reference) or {}).get("details", [])
+            ],
+        }
+    return result, references
 
 
 MKT_PROJECT_REPORT_ACCOUNTS = [
@@ -14142,6 +17866,38 @@ def _build_project_metric_map(cur, rows):
         if project_id:
             metrics.setdefault(project_id, {"budget": {}, "actual": {}})["has_delivery_invoice"] = True
 
+    project_refs_by_id = {}
+    all_references = []
+    for row in rows:
+        project_id = int(row[0] or 0)
+        project_no = str(row[1] or "").strip()
+        if not project_id or _detect_project_type(project_no) != "mkt":
+            continue
+        references = _project_sales_order_references(row[2])
+        if not references:
+            continue
+        project_refs_by_id[project_id] = references
+        all_references.extend(references)
+
+    if all_references:
+        cf_map = _profit_loss_cf_map(cur, all_references)
+        mf_map = _profit_loss_mf_map(cur, all_references)
+        for project_id, references in project_refs_by_id.items():
+            fee_actual = {}
+            for account_key, fee_map in (
+                ("6.00.00.003-CF", cf_map),
+                ("6.00.00.003-MF", mf_map),
+            ):
+                amount = sum(
+                    _to_float((fee_map.get(reference) or {}).get("amount"))
+                    for reference in references
+                    if fee_map.get(reference)
+                )
+                if amount:
+                    fee_actual[account_key] = round(amount, 2)
+            if fee_actual:
+                metrics.setdefault(project_id, {"budget": {}, "actual": {}})["profit_loss_fee_actual"] = fee_actual
+
     return metrics
 
 PROJECT_MANUAL_REALIZATION_ACCOUNTS = {
@@ -14192,6 +17948,15 @@ def _project_profit_loss_formula(values):
     return revenue - discount - expenses
 
 
+def _project_display_cost_total(values):
+    return sum(
+        abs(_to_float(amount))
+        for account, amount in values.items()
+        if str(account or "").startswith(("5.", "6."))
+        and account != PROJECT_HPP_ACCOUNT
+    )
+
+
 @app.route("/api/project/manual-realization", methods=["POST"])
 @jwt_required()
 def api_project_manual_realization_save():
@@ -14225,6 +17990,46 @@ def api_project_manual_realization_save():
     except Exception as e:
         print(f"Error api_project_manual_realization_save: {e}")
         return jsonify({"message": "Gagal menyimpan realisasi manual.", "error": str(e)}), 500
+
+
+@app.route("/api/project/remark", methods=["POST"])
+@jwt_required()
+def api_project_remark_save():
+    if not check_permission("project"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        data = request.get_json(silent=True) or {}
+        project_no = str(data.get("project_no") or "").strip()
+        remarks = str(data.get("remarks") or "").strip()
+        if not project_no:
+            return jsonify({"message": "No project wajib diisi."}), 400
+        if len(remarks) > 500:
+            return jsonify({"message": "Remarks maksimal 500 karakter."}), 400
+
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT FIRST 1 p.PROJECTNO
+            FROM PROJECT p
+            WHERE UPPER(TRIM(p.PROJECTNO)) = UPPER(TRIM(?))
+        """, [project_no])
+        valid_row = cur.fetchone()
+        con.close()
+        if not valid_row:
+            return jsonify({"message": "Project tidak ditemukan."}), 404
+
+        user = get_current_user()
+        saved = save_project_remark(project_no, remarks, user.get("username"))
+        audit_current_user(
+            "project_remark_save",
+            "project",
+            f"Update remarks project {project_no}",
+            saved,
+        )
+        return jsonify({"message": "Remarks disimpan.", "data": saved})
+    except Exception as e:
+        print(f"Error api_project_remark_save: {e}")
+        return jsonify({"message": "Gagal menyimpan remarks.", "error": str(e)}), 500
 
 
 @app.route("/api/project/report")
@@ -14331,10 +18136,15 @@ def api_project_report():
         selected_project_no = str(project[1] or "").strip()
         detected_project_type = _detect_project_type(selected_project_no)
         selected_project_type = requested_project_type if requested_project_type in ("mkt", "ga") else detected_project_type
+        project_fee_realizations = {}
+        project_so_references = []
         if selected_project_type == "mkt":
             has_delivery_invoice = _project_has_delivery_invoice(cur, selected_project_id)
             if not has_delivery_invoice:
                 actual_map.pop(PROJECT_HPP_ACCOUNT, None)
+            project_fee_realizations, project_so_references = (
+                _project_profit_loss_fee_realizations(cur, project[2])
+            )
         con.close()
 
         report_note = get_project_report_note(selected_project_no)
@@ -14388,7 +18198,12 @@ def api_project_report():
             for manual_row in MKT_PROJECT_MANUAL_EXPENSE_ROWS:
                 account_key = manual_row["account_key"]
                 manual = manual_map.get(account_key)
-                actual_display = abs(_to_float((manual or {}).get("amount")))
+                profit_loss_fee = project_fee_realizations.get(account_key)
+                has_profit_loss_value = bool(profit_loss_fee)
+                if has_profit_loss_value:
+                    actual_display = abs(_to_float(profit_loss_fee.get("amount")))
+                else:
+                    actual_display = abs(_to_float((manual or {}).get("amount")))
                 rab_values[account_key] = 0.0
                 actual_values[account_key] = actual_display
                 rows.append({
@@ -14397,11 +18212,14 @@ def api_project_report():
                     "nama_akun": manual_row["account_name"],
                     "rab": 0.0,
                     "realisasi": round(actual_display, 2),
-                    "is_manual": bool(manual),
+                    "is_manual": bool(manual) and not has_profit_loss_value,
                     "manual_note": manual.get("note", "") if manual else "",
                     "manual_updated_by": manual.get("updated_by", "") if manual else "",
                     "manual_updated_at": manual.get("updated_at", "") if manual else "",
-                    "has_easy_realization": False,
+                    "has_easy_realization": has_profit_loss_value,
+                    "realization_source": "profit_loss" if has_profit_loss_value else "",
+                    "source_references": profit_loss_fee.get("references", []) if profit_loss_fee else [],
+                    "fee_details": profit_loss_fee.get("details", []) if profit_loss_fee else [],
                 })
 
         profit_loss_rab = _project_profit_loss_formula(rab_values)
@@ -14456,6 +18274,7 @@ def api_project_report():
             "dihentikan": bool(int(project[8] or 0)),
             "deskripsi": str(project[6] or "").strip(),
             "project_type": selected_project_type,
+            "sales_order_references": project_so_references,
             "is_ga_project": is_ga_project,
             "report_note": report_note.get("note", ""),
             "report_note_updated_by": report_note.get("updated_by", ""),

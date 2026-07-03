@@ -24,15 +24,42 @@ const formatValue = (row, column) => {
   return value ?? ''
 }
 
+const htmlCell = (row, column) => {
+  const value = row[column.key]
+  if (column.type === 'number') {
+    const numberValue = Number(value || 0)
+    return `<td style="text-align:right;mso-number-format:'#,##0.00';">${Number.isFinite(numberValue) ? numberValue : 0}</td>`
+  }
+  if (column.type === 'date') {
+    const dateValue = value ? dayjs(value) : null
+    const displayValue = dateValue?.isValid() ? dateValue.format('YYYY-MM-DD') : ''
+    return `<td style="text-align:left;mso-number-format:'dd\\/mm\\/yyyy';">${escapeCell(displayValue)}</td>`
+  }
+  if (column.type === 'datetime') {
+    const dateValue = value ? dayjs(value) : null
+    const displayValue = dateValue?.isValid() ? dateValue.format('YYYY-MM-DD HH:mm:ss') : ''
+    return `<td style="text-align:left;mso-number-format:'dd\\/mm\\/yyyy\\ hh:mm';">${escapeCell(displayValue)}</td>`
+  }
+  return `<td style="text-align:left;mso-number-format:'\\@';">${escapeCell(value ?? '')}</td>`
+}
+
 const xmlCell = (row, column, header = false) => {
   if (header) {
     return `<Cell ss:StyleID="Header"><Data ss:Type="String">${escapeCell(column.label)}</Data></Cell>`
   }
-  const value = formatValue(row, column)
   if (column.type === 'number') {
-    return `<Cell ss:StyleID="Number"><Data ss:Type="Number">${Number(value || 0)}</Data></Cell>`
+    const numberValue = Number(row[column.key] || 0)
+    return `<Cell ss:StyleID="Number"><Data ss:Type="Number">${Number.isFinite(numberValue) ? numberValue : 0}</Data></Cell>`
   }
-  return `<Cell ss:StyleID="Text"><Data ss:Type="String">${escapeCell(value)}</Data></Cell>`
+  if (column.type === 'date' || column.type === 'datetime') {
+    const dateValue = row[column.key] ? dayjs(row[column.key]) : null
+    if (!dateValue?.isValid()) {
+      return '<Cell ss:StyleID="Text"><Data ss:Type="String"></Data></Cell>'
+    }
+    const styleId = column.type === 'datetime' ? 'DateTime' : 'Date'
+    return `<Cell ss:StyleID="${styleId}"><Data ss:Type="DateTime">${dateValue.format('YYYY-MM-DDTHH:mm:ss')}</Data></Cell>`
+  }
+  return `<Cell ss:StyleID="Text"><Data ss:Type="String">${escapeCell(row[column.key] ?? '')}</Data></Cell>`
 }
 
 export function downloadXLS(rows, columns, filename, sheetName = filename) {
@@ -42,9 +69,7 @@ export function downloadXLS(rows, columns, filename, sheetName = filename) {
 
   const body = rows.map(row => (
     `<tr>${columns.map(column => {
-      const value = formatValue(row, column)
-      const align = column.type === 'number' ? 'right' : 'left'
-      return `<td style="text-align:${align};mso-number-format:'\\@';">${escapeCell(value)}</td>`
+      return htmlCell(row, column)
     }).join('')}</tr>`
   )).join('')
 
@@ -127,6 +152,12 @@ export function downloadWorkbookXLS(sheets, filename) {
           <Alignment ss:Horizontal="Right"/>
           <NumberFormat ss:Format="#,##0.00"/>
         </Style>
+        <Style ss:ID="Date">
+          <NumberFormat ss:Format="dd/mm/yyyy"/>
+        </Style>
+        <Style ss:ID="DateTime">
+          <NumberFormat ss:Format="dd/mm/yyyy hh:mm"/>
+        </Style>
       </Styles>
       ${worksheets}
     </Workbook>
@@ -198,7 +229,9 @@ export async function exportRowsToXLS({
       return
     }
 
-    downloadXLS(exportRows, columns, filename, sheetName)
+    downloadWorkbookXLS([
+      { name: sheetName || filename, columns, rows: exportRows },
+    ], filename)
     try {
       await api.post('/api/audit/event', {
         action: 'export',

@@ -34,8 +34,8 @@ const STOCK_EXPORT_COLS = [
   { key: 'itemno', label: 'No. Barang' },
   { key: 'description', label: 'Deskripsi' },
   { key: 'description2', label: 'Deskripsi 2' },
-  { key: 'quantity', label: 'Stok Tersedia', type: 'number' },
-  { key: 'stock_sistem', label: 'Stock Sistem', type: 'number' },
+  { key: 'stock_sistem', label: 'Stok Sistem', type: 'number' },
+  { key: 'stock_centre', label: 'Stok Centre', type: 'number' },
   { key: 'minimum_qty', label: 'Minimum Stok', type: 'number' },
   { key: 'stock_note', label: 'Note' },
   { key: 'unit', label: 'Satuan' },
@@ -111,6 +111,8 @@ export default function Stock() {
   const [activeFilters, setActiveFilters] = useState({})
   const [activeSorter, setActiveSorter] = useState({})
   const [filterOptions, setFilterOptions] = useState({})
+  const [warehouseStock, setWarehouseStock] = useState({})
+  const [warehouseLoading, setWarehouseLoading] = useState({})
   const searchRef = useRef('')
   const filtersRef = useRef({})
   const sorterRef = useRef({})
@@ -196,6 +198,60 @@ export default function Stock() {
   }, [handleSearch, searchValue])
 
   const tableRows = data
+
+  const fetchWarehouseStock = useCallback(async itemno => {
+    const key = String(itemno || '').trim()
+    if (!key || warehouseStock[key] || warehouseLoading[key]) return
+    setWarehouseLoading(prev => ({ ...prev, [key]: true }))
+    try {
+      const res = await api.get('/api/stock/warehouses', { params: { itemno: key } })
+      setWarehouseStock(prev => ({ ...prev, [key]: res.data.data || null }))
+    } catch (error) {
+      setWarehouseStock(prev => ({ ...prev, [key]: null }))
+      message.error(error.response?.data?.message || 'Gagal memuat stok gudang')
+    } finally {
+      setWarehouseLoading(prev => ({ ...prev, [key]: false }))
+    }
+  }, [warehouseLoading, warehouseStock])
+
+  const renderWarehouseContent = record => {
+    const itemno = String(record.itemno || '').trim()
+    const detail = warehouseStock[itemno]
+    if (warehouseLoading[itemno]) return <Text type="secondary">Memuat stok gudang...</Text>
+    if (!detail) return <Text type="secondary">Belum ada data gudang.</Text>
+    return (
+      <div style={{ width: 420, maxHeight: 360, overflowY: 'auto' }}>
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <div>
+            <Text strong>{detail.itemno}</Text>
+            <br />
+            <Text type="secondary">{detail.description || '-'}</Text>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid #eef2f7', paddingBottom: 6 }}>
+            <Text strong>Total Semua Gudang</Text>
+            <Text strong>{Number(detail.total_quantity || 0).toFixed(2)} {detail.unit || ''}</Text>
+          </div>
+          {(detail.warehouses || []).map(row => (
+            <div
+              key={`${row.warehouse_id}-${row.warehouse_name}`}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 96px',
+                gap: 12,
+                padding: '5px 0',
+                borderBottom: '1px solid #f1f5f9',
+              }}
+            >
+              <Text>{row.warehouse_name || '-'}</Text>
+              <Text style={{ textAlign: 'right', color: Number(row.quantity || 0) < 0 ? '#cf1322' : undefined }}>
+                {Number(row.quantity || 0).toFixed(2)}
+              </Text>
+            </div>
+          ))}
+        </Space>
+      </div>
+    )
+  }
 
   const checklistFilterProps = (dataIndex, filters) => ({
     filters,
@@ -301,24 +357,7 @@ export default function Stock() {
       ...serverSorterProps('description2'),
     },
     {
-      title: 'Stok Tersedia',
-      dataIndex: 'quantity',
-      key: 'quantity',
-      width: 125,
-      ...serverSorterProps('quantity'),
-      render: (val, record) => {
-        const quantity = Number(val || 0)
-        const minimumQty = Number(record.minimum_qty || 0)
-        const belowMinimum = minimumQty > 0 && quantity < minimumQty
-        return (
-          <span style={{ color: belowMinimum ? '#ff4d4f' : undefined, fontWeight: 'bold' }}>
-            {quantity.toFixed(2)}
-          </span>
-        )
-      }
-    },
-    {
-      title: 'Stock Sistem',
+      title: 'Stok Sistem',
       dataIndex: 'stock_sistem',
       key: 'stock_sistem',
       width: 125,
@@ -328,6 +367,39 @@ export default function Stock() {
         <span style={{ color: Number(val || 0) > 0 ? '#08979c' : '#cf1322', fontWeight: 'bold' }}>
           {Number(val || 0).toFixed(2)}
         </span>
+      ),
+    },
+    {
+      title: 'Stok Centre',
+      dataIndex: 'stock_centre',
+      key: 'stock_centre',
+      width: 150,
+      align: 'right',
+      ...serverSorterProps('stock_centre'),
+      render: (val, record) => (
+        <Popover
+          title="Stok per Gudang"
+          content={renderWarehouseContent(record)}
+          trigger="click"
+          placement="left"
+          onOpenChange={open => {
+            if (open) fetchWarehouseStock(record.itemno)
+          }}
+        >
+          <Button
+            type="link"
+            size="small"
+            onClick={event => event.stopPropagation()}
+            style={{
+              height: 'auto',
+              padding: 0,
+              fontWeight: 700,
+              color: Number(val || 0) > 0 ? '#1677ff' : '#8c8c8c',
+            }}
+          >
+            {Number(val || 0).toFixed(2)}
+          </Button>
+        </Popover>
       ),
     },
     {
@@ -480,7 +552,7 @@ export default function Stock() {
           showTotal: (total, range) => `${range[0]}-${range[1]} dari ${total} item`,
         }}
         onChange={handleTableChange}
-        scroll={{ x: 1110 }}
+        scroll={{ x: 985 }}
         sticky={{ offsetHeader: 0 }}
         size="middle"
       />

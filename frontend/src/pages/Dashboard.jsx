@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Card, Col, DatePicker, Divider, Modal, Pagination, Popover, Progress, Row, Select, Space, Statistic, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { Button, Card, Col, DatePicker, Divider, Modal, Pagination, Popover, Progress, Row, Select, Space, Statistic, Table, Tabs, Tag, Tooltip, Typography, message } from 'antd'
 import {
   ArrowDownOutlined,
   ArrowUpOutlined,
@@ -12,6 +13,7 @@ import {
   FileDoneOutlined,
   FileTextOutlined,
   InboxOutlined,
+  PrinterOutlined,
   ShoppingCartOutlined,
   ShoppingOutlined,
   SafetyCertificateOutlined,
@@ -92,6 +94,23 @@ const emptySummary = {
       active_customers: 0,
       repeat_customers: 0,
       new_customers: 0,
+    },
+    delivery_history: {
+      do_count: 0,
+      do_amount: 0,
+      gr_count: 0,
+      gr_amount: 0,
+      sr_count: 0,
+      sr_amount: 0,
+      packing_count: 0,
+      packing_amount: 0,
+      pemasangan_count: 0,
+      pemasangan_amount: 0,
+      do_rows: [],
+      gr_rows: [],
+      sr_rows: [],
+      packing_rows: [],
+      pemasangan_rows: [],
     },
     outstanding_receivables: [],
     receivable_aging: [],
@@ -1062,7 +1081,7 @@ function ReceivableAging({ rows, fallbackRows, loading }) {
   )
 }
 
-function SalesOrderStatusCard({ status = {}, loading }) {
+function SalesOrderStatusCard({ status = {}, loading, compact = false }) {
   const total = Number(status.total || 0)
   const repeatCustomers = Number(status.repeat_customers || 0)
   const activeCustomers = Number(status.active_customers || 0)
@@ -1077,6 +1096,10 @@ function SalesOrderStatusCard({ status = {}, loading }) {
   const receivedPct = total ? Math.round((Number(status.received || 0) / total) * 100) : 0
   const pendingTotal = Number(status.open || 0) + Number(status.process || 0)
   const activeSharePct = activeCustomers ? Math.round((newCustomers / activeCustomers) * 100) : 0
+  const invoicedSo = Number(status.invoiced_so || 0)
+  const paidSo = Number(status.paid_so || 0)
+  const invoicePct = total ? Math.round((invoicedSo / total) * 100) : 0
+  const paidPct = total ? Math.round((paidSo / total) * 100) : 0
 
   return (
     <Card
@@ -1130,6 +1153,47 @@ function SalesOrderStatusCard({ status = {}, loading }) {
               <div style={{ color: green, fontSize: 18, fontWeight: 800 }}>{formatNumber(status.received || 0)} SO</div>
             </div>
           </div>
+          {!compact && (
+            <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              {[
+                {
+                  label: 'Sudah invoice',
+                  count: invoicedSo,
+                  amount: status.invoiced_amount,
+                  pct: invoicePct,
+                  color: purple,
+                },
+                {
+                  label: 'Pembayaran diterima',
+                  count: paidSo,
+                  amount: status.paid_amount,
+                  pct: paidPct,
+                  color: cyan,
+                },
+              ].map(item => (
+                <div
+                  key={item.label}
+                  style={{
+                    padding: '10px 11px',
+                    borderRadius: 8,
+                    background: `${item.color}0d`,
+                    boxShadow: `inset 0 0 0 1px ${item.color}20`,
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                    <Text type="secondary" style={{ fontSize: 11 }}>{item.label}</Text>
+                    <Tag color={item.color} style={{ marginInlineEnd: 0, fontSize: 10 }}>{item.pct}%</Tag>
+                  </div>
+                  <div style={{ color: item.color, fontSize: 17, fontWeight: 800 }}>
+                    {formatNumber(item.count)} SO
+                  </div>
+                  <Text strong style={{ display: 'block', marginTop: 2, fontSize: 12 }}>
+                    {formatCurrency(item.amount || 0)}
+                  </Text>
+                </div>
+              ))}
+            </div>
+          )}
           <div style={{ height: 11, marginTop: 14, display: 'flex', overflow: 'hidden', borderRadius: 999, background: '#edf2f7' }}>
             {statusRows.map(row => {
               const pct = total ? (row.value / total) * 100 : 0
@@ -1160,7 +1224,7 @@ function SalesOrderStatusCard({ status = {}, loading }) {
             <Text strong style={{ color: '#20243a' }}>Breakdown status</Text>
             <Text type="secondary" style={{ fontSize: 12 }}>bulan ini</Text>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16 }}>
             <Space direction="vertical" size={10} style={{ width: '100%' }}>
             {statusRows.map(row => {
               const pct = total ? Math.round((row.value / total) * 100) : 0
@@ -1183,6 +1247,7 @@ function SalesOrderStatusCard({ status = {}, loading }) {
               )
             })}
             </Space>
+            {!compact && (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 10 }}>
               {[
                 { label: 'Pelanggan aktif', value: formatNumber(activeCustomers), suffix: 'pelanggan', color: purple },
@@ -1206,6 +1271,7 @@ function SalesOrderStatusCard({ status = {}, loading }) {
                 </div>
               ))}
             </div>
+            )}
           </div>
         </div>
       </div>
@@ -2594,9 +2660,150 @@ const dailyReportEmpty = {
   category_keys: ['EJF', 'GPP', 'OTM', 'SWG', 'NON GTE'],
 }
 
+function SalesDailyReportPrintSheet({ report, periodTitle }) {
+  if (!report) return null
+
+  const categoryKeys = report.category_keys || dailyReportEmpty.category_keys
+  const quantityTotals = report.totals?.quantity || {}
+  const rows = report.rows || []
+  const marketingRows = report.marketing_summary || []
+  const quantityRows = report.quantity_summary || []
+
+  return createPortal(
+    <section className="sales-daily-print-sheet">
+      <header className="sales-daily-print-header">
+        <div>
+          <h1>Report Harian Penjualan SO</h1>
+          <p>Ringkasan sales order, faktur, dan quantity per marketing</p>
+        </div>
+        <div>
+          <span>Periode</span>
+          <strong>{periodTitle}</strong>
+        </div>
+      </header>
+
+      <section className="sales-daily-print-section">
+        <table className="sales-daily-print-main-table">
+          <thead>
+            <tr>
+              <th>Penjual</th>
+              <th>No. Customer</th>
+              <th>Customer</th>
+              <th>No. SO</th>
+              <th>No. PO</th>
+              <th>Tgl. SO</th>
+              <th>Target Kirim</th>
+              <th>Sub Total</th>
+              <th>Nilai Faktur</th>
+              <th>Jumlah Faktur</th>
+              <th>Status Faktur</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length ? rows.map(row => (
+              <tr key={row.key || row.no_so}>
+                <td>{row.penjual || '-'}</td>
+                <td>{row.no_customer || '-'}</td>
+                <td>{row.customer || '-'}</td>
+                <td>{row.no_so || '-'}</td>
+                <td>{row.no_po || '-'}</td>
+                <td>{row.tgl_so ? dayjs(row.tgl_so).format('DD/MM/YY') : '-'}</td>
+                <td>{row.target_kirim ? dayjs(row.target_kirim).format('DD/MM/YY') : '-'}</td>
+                <td>{formatCurrency(row.sub_total || 0)}</td>
+                <td>{formatCurrency(row.nilai_faktur || 0)}</td>
+                <td>{formatCurrency(row.jumlah_faktur || 0)}</td>
+                <td>{row.status_faktur || 'Menunggu'}</td>
+              </tr>
+            )) : (
+              <tr>
+                <td colSpan={11} className="sales-daily-print-empty">Tidak ada data</td>
+              </tr>
+            )}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td colSpan={9}>Grand Total</td>
+              <td>{formatCurrency(report.totals?.total_faktur || 0)}</td>
+              <td />
+            </tr>
+          </tfoot>
+        </table>
+      </section>
+
+      <div className="sales-daily-print-grid">
+        <section className="sales-daily-print-section">
+          <table>
+            <thead>
+              <tr>
+                <th>Marketing</th>
+                <th>Total SO</th>
+                <th>Total Faktur</th>
+              </tr>
+            </thead>
+            <tbody>
+              {marketingRows.length ? marketingRows.map(row => (
+                <tr key={row.key || row.marketing}>
+                  <td>{row.marketing || '-'}</td>
+                  <td>{formatNumber(row.total_so || 0)}</td>
+                  <td>{formatCurrency(row.total_faktur || 0)}</td>
+                </tr>
+              )) : (
+                <tr>
+                  <td colSpan={3} className="sales-daily-print-empty">Tidak ada data</td>
+                </tr>
+              )}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td>Grand Total</td>
+                <td>{formatNumber(report.totals?.total_so || 0)}</td>
+                <td>{formatCurrency(report.totals?.total_faktur || 0)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </section>
+
+        <section className="sales-daily-print-section">
+          <table>
+            <thead>
+              <tr>
+                <th>Marketing</th>
+                {categoryKeys.map(key => <th key={key}>{key}</th>)}
+                <th>Grand Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {quantityRows.length ? quantityRows.map(row => (
+                <tr key={row.key || row.marketing}>
+                  <td>{row.marketing || '-'}</td>
+                  {categoryKeys.map(key => <td key={key}>{row[key] ? formatQty(row[key]) : ''}</td>)}
+                  <td>{formatQty(row.grand_total || 0)}</td>
+                </tr>
+              )) : (
+                <tr>
+                  <td colSpan={categoryKeys.length + 2} className="sales-daily-print-empty">Tidak ada data</td>
+                </tr>
+              )}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td>Grand Total</td>
+                {categoryKeys.map(key => <td key={key}>{formatQty(quantityTotals[key] || 0)}</td>)}
+                <td>{formatQty(quantityTotals.grand_total || 0)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </section>
+      </div>
+    </section>,
+    document.body,
+  )
+}
+
 function SalesDailyReport({ dateRange }) {
   const [report, setReport] = useState(dailyReportEmpty)
   const [loading, setLoading] = useState(false)
+  const [printReport, setPrintReport] = useState(null)
   const today = dayjs()
 
   useEffect(() => {
@@ -2634,6 +2841,16 @@ function SalesDailyReport({ dateRange }) {
   }, [])
 
   const periodTitle = today.format('DD MMMM YYYY').toUpperCase()
+  const handlePrint = useCallback(() => {
+    setPrintReport(report)
+    window.setTimeout(() => window.print(), 100)
+  }, [report])
+
+  useEffect(() => {
+    const clearPrintReport = () => setPrintReport(null)
+    window.addEventListener('afterprint', clearPrintReport)
+    return () => window.removeEventListener('afterprint', clearPrintReport)
+  }, [])
 
   const salesColumns = [
     { title: 'Penjual', dataIndex: 'penjual', width: 118, fixed: 'left', ellipsis: true },
@@ -2681,7 +2898,21 @@ function SalesDailyReport({ dateRange }) {
   return (
     <Card
       title={<span><FileDoneOutlined style={{ color: red }} /> Report Harian Penjualan SO</span>}
-      extra={<Text type="secondary">Periode {periodTitle}</Text>}
+      extra={(
+        <Space size={8}>
+          <Text type="secondary">Periode {periodTitle}</Text>
+          <Button
+            size="small"
+            type="primary"
+            icon={<PrinterOutlined />}
+            loading={loading}
+            disabled={loading}
+            onClick={handlePrint}
+          >
+            Print PDF
+          </Button>
+        </Space>
+      )}
       loading={loading}
       style={{ borderRadius: 8, border: softBorder }}
       styles={{ body: { padding: 8 } }}
@@ -2777,13 +3008,427 @@ function SalesDailyReport({ dateRange }) {
           white-space: nowrap;
         }
       `}</style>
+      <SalesDailyReportPrintSheet report={printReport} periodTitle={periodTitle} />
     </Card>
+  )
+}
+
+function MarketingReportTabs({ marketingRows = [], receivableRows = [], loading }) {
+  const [activeTab, setActiveTab] = useState('summary')
+
+  const items = [
+    {
+      key: 'summary',
+      label: (
+        <Space size={6}>
+          <TrophyOutlined />
+          <span>Ringkasan</span>
+        </Space>
+      ),
+      children: (
+        <MarketingReceivableOverview
+          marketingRows={marketingRows}
+          receivableRows={receivableRows}
+          loading={loading}
+        />
+      ),
+    },
+    {
+      key: 'customer-performance',
+      label: (
+        <Space size={6}>
+          <UserOutlined />
+          <span>Performa Customer</span>
+        </Space>
+      ),
+      children: <MarketingCustomerPerformance rows={marketingRows} loading={loading} />,
+    },
+    {
+      key: 'receivables',
+      label: (
+        <Space size={6}>
+          <DollarOutlined />
+          <span>Detail Piutang</span>
+        </Space>
+      ),
+      children: <SalesReceivablesBySalesman rows={receivableRows} loading={loading} />,
+    },
+  ]
+
+  return (
+    <Card
+      title="Analisis Kinerja Marketing & Piutang"
+      extra={<Text type="secondary">Pilih sudut analisis yang dibutuhkan</Text>}
+      className="marketing-report-tabs-card"
+      styles={{ body: { paddingTop: 4 } }}
+    >
+      <Tabs
+        activeKey={activeTab}
+        items={items}
+        destroyOnHidden
+        onChange={setActiveTab}
+      />
+    </Card>
+  )
+}
+
+function buildSalesCustomerRows(sales) {
+  if (!sales) return []
+  const salesCustomerMap = new Map((sales.customers || []).map(customer => [
+    String(customer.customer_id || customer.customer_name),
+    customer,
+  ]))
+  const receivableCustomerMap = new Map((sales.receivable_customers || []).map(customer => [
+    String(customer.customer_id || customer.customer_name),
+    customer,
+  ]))
+  return Array.from(new Set([...salesCustomerMap.keys(), ...receivableCustomerMap.keys()])).map(key => {
+    const salesCustomer = salesCustomerMap.get(key) || {}
+    const receivableCustomer = receivableCustomerMap.get(key) || {}
+    return {
+      key,
+      customer_no: salesCustomer.customer_no || receivableCustomer.customer_no || '',
+      customer_name: salesCustomer.customer_name || receivableCustomer.customer_name || 'Tanpa Customer',
+      current_amount: Number(salesCustomer.current_amount || 0),
+      previous_amount: Number(salesCustomer.previous_amount || 0),
+      receivable_amount: Number(receivableCustomer.amount || 0),
+      due_amount: Number(receivableCustomer.due_amount || 0),
+      not_due_amount: Number(receivableCustomer.not_due_amount || 0),
+      oldest_overdue_days: Number(receivableCustomer.oldest_overdue_days || 0),
+      invoices: receivableCustomer.invoices || [],
+    }
+  }).sort((a, b) => (b.due_amount - a.due_amount) || (b.current_amount - a.current_amount))
+}
+
+function SalesPerformancePrintSheet({ sales }) {
+  if (!sales) return null
+
+  const currentYear = sales.year || dayjs().year()
+  const previousYear = sales.previous_year || currentYear - 1
+  const customerRows = buildSalesCustomerRows(sales)
+  const overdueInvoices = customerRows.flatMap(customer => (
+    customer.invoices
+      .filter(invoice => Number(invoice.overdue_days || 0) >= 0)
+      .map(invoice => ({ ...invoice, customer_name: customer.customer_name }))
+  ))
+  const dueRatio = Number(sales.receivable_amount || 0)
+    ? (Number(sales.due_amount || 0) / Number(sales.receivable_amount || 0)) * 100
+    : 0
+  const targetAchievementPct = Number(sales.target_achievement_pct || 0)
+
+  return createPortal(
+    <section className="sales-performance-print-sheet">
+      <header className="sales-performance-print-header">
+        <div>
+          <h1>LAPORAN KINERJA SALES & PIUTANG</h1>
+          <p>Monitoring performa customer dan tindak lanjut penagihan</p>
+        </div>
+        <div className="sales-performance-print-period">
+          <span>Periode</span>
+          <strong>{sales.current_to ? `s.d. ${dayjs(sales.current_to).format('DD MMM YYYY')}` : `${currentYear} YTD`}</strong>
+        </div>
+      </header>
+
+      <div className="sales-performance-print-identity">
+        <span>Sales / Marketing</span>
+        <strong>{sales.name || sales.salesman_name || 'Tanpa Salesman'}</strong>
+        <span>Jumlah Customer</span>
+        <strong>{formatNumber(customerRows.length)}</strong>
+      </div>
+
+      <div className="sales-performance-print-summary">
+        {[
+          [`Sales ${previousYear}`, formatCurrency(sales.previous_amount || 0)],
+          [`Sales ${currentYear} YTD`, formatCurrency(sales.current_amount || 0)],
+          [`Target ${currentYear} YTD`, formatCurrency(sales.target_ytd || 0)],
+          ['Achv Target', `${targetAchievementPct.toLocaleString('id-ID', { maximumFractionDigits: 1 })}%`],
+          ['Gap Target', formatCurrency(sales.target_gap_amount || 0)],
+          ['Total Piutang', formatCurrency(sales.receivable_amount || 0)],
+          ['Jatuh Tempo', formatCurrency(sales.due_amount || 0)],
+          ['Rasio Jatuh Tempo', `${dueRatio.toLocaleString('id-ID', { maximumFractionDigits: 1 })}%`],
+        ].map(([label, value]) => (
+          <div key={label}>
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </div>
+        ))}
+      </div>
+
+      <section className="sales-performance-print-section">
+        <h2>Performa dan Piutang per Customer</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>No</th>
+              <th>Customer</th>
+              <th>Sales {previousYear}</th>
+              <th>Sales {currentYear}</th>
+              <th>Piutang</th>
+              <th>Jatuh Tempo</th>
+              <th>Umur</th>
+            </tr>
+          </thead>
+          <tbody>
+            {customerRows.map((customer, index) => (
+              <tr key={customer.key}>
+                <td>{index + 1}</td>
+                <td><strong>{customer.customer_name}</strong><small>{customer.customer_no || '-'}</small></td>
+                <td>{formatCurrency(customer.previous_amount)}</td>
+                <td>{formatCurrency(customer.current_amount)}</td>
+                <td>{formatCurrency(customer.receivable_amount)}</td>
+                <td className={customer.due_amount > 0 ? 'is-danger' : ''}>{formatCurrency(customer.due_amount)}</td>
+                <td>{customer.oldest_overdue_days > 0 ? `${formatNumber(customer.oldest_overdue_days)} hari` : '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      <section className="sales-performance-print-section">
+        <h2>Invoice yang Perlu Ditagih</h2>
+        {overdueInvoices.length ? (
+          <table>
+            <thead>
+              <tr>
+                <th>No</th>
+                <th>Customer</th>
+                <th>No Faktur</th>
+                <th>Jatuh Tempo</th>
+                <th>No PO</th>
+                <th>Belum Bayar</th>
+                <th>Overdue</th>
+              </tr>
+            </thead>
+            <tbody>
+              {overdueInvoices.map((invoice, index) => (
+                <tr key={`${invoice.invoice_id || invoice.no_faktur}-${index}`}>
+                  <td>{index + 1}</td>
+                  <td>{invoice.customer_name}</td>
+                  <td>{invoice.no_faktur || '-'}</td>
+                  <td>{invoice.due_date ? dayjs(invoice.due_date).format('DD/MM/YYYY') : '-'}</td>
+                  <td>{invoice.no_po || '-'}</td>
+                  <td className="is-danger">{formatCurrency(invoice.terhutang || 0)}</td>
+                  <td>{Number(invoice.overdue_days || 0) > 0 ? `${formatNumber(invoice.overdue_days)} hari` : 'Hari ini'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="sales-performance-print-empty">Tidak ada invoice yang sudah jatuh tempo.</p>
+        )}
+      </section>
+
+      <footer className="sales-performance-print-footer">
+        <div>Catatan tindak lanjut:</div>
+        <div className="sales-performance-print-signature">
+          <span>Sales / Marketing</span>
+          <span>Atasan</span>
+        </div>
+      </footer>
+    </section>,
+    document.body,
+  )
+}
+
+function CustomerPerformancePrintSheet({ marketing }) {
+  if (!marketing) return null
+  const currentYear = marketing.year || dayjs().year()
+  const previousYear = marketing.previous_year || currentYear - 1
+  const customers = marketing.customers || []
+
+  return createPortal(
+    <section className="sales-performance-print-sheet">
+      <header className="sales-performance-print-header">
+        <div>
+          <h1>PERFORMA MARKETING PER CUSTOMER</h1>
+          <p>Perbandingan penjualan dan aktivitas customer</p>
+        </div>
+        <div className="sales-performance-print-period">
+          <span>Periode</span>
+          <strong>{previousYear} vs {currentYear} YTD</strong>
+        </div>
+      </header>
+      <div className="sales-performance-print-identity">
+        <span>Marketing</span>
+        <strong>{marketing.name || 'Tanpa Salesman'}</strong>
+        <span>Customer Aktif / Nonaktif</span>
+        <strong>{formatNumber(marketing.customer_count || customers.length)} / {formatNumber(marketing.inactive_customer_count || 0)}</strong>
+      </div>
+      <div className="sales-performance-print-summary">
+        {[
+          [`Sales ${previousYear}`, formatCurrency(marketing.previous_amount || 0)],
+          [`Sales ${currentYear} YTD`, formatCurrency(marketing.current_amount || 0)],
+          [`Target ${currentYear} YTD`, formatCurrency(marketing.target_ytd || 0)],
+          ['Achv Target', `${Number(marketing.target_achievement_pct || 0).toLocaleString('id-ID', { maximumFractionDigits: 1 })}%`],
+          ['Gap Target', formatCurrency(marketing.target_gap_amount || 0)],
+          [`Achv vs ${previousYear}`, `${Number(marketing.achievement_pct || 0).toLocaleString('id-ID', { maximumFractionDigits: 1 })}%`],
+          ['Selisih', formatCurrency(marketing.diff_amount || 0)],
+          [`Customer Order ${previousYear}`, formatNumber(marketing.previous_order_customer_count || 0)],
+          [`Customer Order ${currentYear}`, formatNumber(marketing.current_order_customer_count || 0)],
+          ['Customer Belum Sales', formatNumber(marketing.zero_with_previous_count || 0)],
+          ['Customer Aktif', formatNumber(marketing.customer_count || customers.length)],
+          ['Customer Tidak Aktif', formatNumber(marketing.inactive_customer_count || 0)],
+        ].map(([label, value]) => (
+          <div key={label}><span>{label}</span><strong>{value}</strong></div>
+        ))}
+      </div>
+      <section className="sales-performance-print-section">
+        <h2>Detail Performa Customer</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>No</th>
+              <th>Customer</th>
+              <th>Sales {previousYear}</th>
+              <th>Sales {currentYear}</th>
+              <th>Achv</th>
+              <th>Selisih</th>
+              <th>SO {previousYear}</th>
+              <th>SO {currentYear}</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {customers.map((customer, index) => (
+              <tr key={customer.customer_id || `${customer.customer_name}-${index}`}>
+                <td>{index + 1}</td>
+                <td><strong>{customer.customer_name || '-'}</strong><small>{customer.customer_no || '-'}</small></td>
+                <td>{formatCurrency(customer.previous_amount || 0)}</td>
+                <td>{formatCurrency(customer.current_amount || 0)}</td>
+                <td>{Number(customer.achievement_pct || 0).toLocaleString('id-ID', { maximumFractionDigits: 1 })}%</td>
+                <td className={Number(customer.diff_amount || 0) < 0 ? 'is-danger' : ''}>{formatCurrency(customer.diff_amount || 0)}</td>
+                <td>{formatNumber(customer.previous_so_count || 0)}</td>
+                <td>{formatNumber(customer.current_so_count || 0)}</td>
+                <td>{customer.status || '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+      <footer className="sales-performance-print-footer">
+        <div>Catatan evaluasi dan rencana tindak lanjut:</div>
+        <div className="sales-performance-print-signature"><span>Marketing</span><span>Atasan</span></div>
+      </footer>
+    </section>,
+    document.body,
+  )
+}
+
+function ReceivableDetailPrintSheet({ salesman }) {
+  if (!salesman) return null
+  const customers = salesman.customers || []
+  const invoices = customers.flatMap(customer => (
+    (customer.invoices || []).map(invoice => ({ ...invoice, customer_name: customer.customer_name }))
+  ))
+
+  return createPortal(
+    <section className="sales-performance-print-sheet">
+      <header className="sales-performance-print-header receivable-print-header">
+        <div>
+          <h1>DETAIL PIUTANG CUSTOMER</h1>
+          <p>Daftar invoice belum lunas untuk tindak lanjut penagihan</p>
+        </div>
+        <div className="sales-performance-print-period">
+          <span>Dicetak</span>
+          <strong>{dayjs().format('DD MMM YYYY')}</strong>
+        </div>
+      </header>
+      <div className="sales-performance-print-identity">
+        <span>Sales / Marketing</span>
+        <strong>{salesman.salesman_name || 'Tanpa Marketing'}</strong>
+        <span>Customer</span>
+        <strong>{formatNumber(salesman.customer_count || customers.length)}</strong>
+      </div>
+      <div className="sales-performance-print-summary">
+        {[
+          ['Total Piutang', formatCurrency(salesman.amount || 0)],
+          ['Jatuh Tempo', formatCurrency(salesman.due_amount || 0)],
+          ['Belum Tempo', formatCurrency(salesman.not_due_amount || 0)],
+          ['Jumlah PO', formatNumber(salesman.po_count || 0)],
+          ['Jumlah Invoice', formatNumber(salesman.invoice_count || invoices.length)],
+          ['Overdue Tertua', Number(salesman.oldest_overdue_days || 0) > 0 ? `${formatNumber(salesman.oldest_overdue_days)} hari` : '-'],
+        ].map(([label, value]) => (
+          <div key={label}><span>{label}</span><strong>{value}</strong></div>
+        ))}
+      </div>
+      <section className="sales-performance-print-section">
+        <h2>Ringkasan Piutang per Customer</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>No</th>
+              <th>Customer</th>
+              <th>PO</th>
+              <th>Invoice</th>
+              <th>Belum Bayar</th>
+              <th>Jatuh Tempo</th>
+              <th>Belum Tempo</th>
+              <th>Overdue</th>
+            </tr>
+          </thead>
+          <tbody>
+            {customers.map((customer, index) => (
+              <tr key={customer.customer_id || `${customer.customer_name}-${index}`}>
+                <td>{index + 1}</td>
+                <td><strong>{customer.customer_name || '-'}</strong><small>{customer.customer_no || '-'}</small></td>
+                <td>{formatNumber(customer.po_count || 0)}</td>
+                <td>{formatNumber(customer.invoice_count || 0)}</td>
+                <td>{formatCurrency(customer.amount || 0)}</td>
+                <td className={Number(customer.due_amount || 0) > 0 ? 'is-danger' : ''}>{formatCurrency(customer.due_amount || 0)}</td>
+                <td>{formatCurrency(customer.not_due_amount || 0)}</td>
+                <td>{Number(customer.oldest_overdue_days || 0) > 0 ? `${formatNumber(customer.oldest_overdue_days)} hari` : '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+      <section className="sales-performance-print-section">
+        <h2>Rincian Invoice Belum Lunas</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>No</th>
+              <th>Customer</th>
+              <th>No Faktur</th>
+              <th>Tgl Faktur</th>
+              <th>Jatuh Tempo</th>
+              <th>No PO</th>
+              <th>No SO</th>
+              <th>Belum Bayar</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {invoices.map((invoice, index) => (
+              <tr key={`${invoice.invoice_id || invoice.no_faktur}-${index}`}>
+                <td>{index + 1}</td>
+                <td>{invoice.customer_name || '-'}</td>
+                <td>{invoice.no_faktur || '-'}</td>
+                <td>{invoice.tgl_faktur ? dayjs(invoice.tgl_faktur).format('DD/MM/YYYY') : '-'}</td>
+                <td>{invoice.due_date ? dayjs(invoice.due_date).format('DD/MM/YYYY') : '-'}</td>
+                <td>{invoice.no_po || '-'}</td>
+                <td>{invoice.no_pesanan || '-'}</td>
+                <td className={Number(invoice.overdue_days || 0) >= 0 ? 'is-danger' : ''}>{formatCurrency(invoice.terhutang || 0)}</td>
+                <td>{invoice.status_label || '-'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+      <footer className="sales-performance-print-footer">
+        <div>Catatan hasil penagihan:</div>
+        <div className="sales-performance-print-signature"><span>Sales / Marketing</span><span>Atasan</span></div>
+      </footer>
+    </section>,
+    document.body,
   )
 }
 
 function MarketingReceivableOverview({ marketingRows = [], receivableRows = [], loading }) {
   const [selectedSales, setSelectedSales] = useState(null)
+  const [printSales, setPrintSales] = useState(null)
   const [salesPage, setSalesPage] = useState(1)
+  const [customerDetailPage, setCustomerDetailPage] = useState(1)
   const safeMarketingRows = Array.isArray(marketingRows) ? marketingRows : []
   const safeReceivableRows = Array.isArray(receivableRows) ? receivableRows : []
   const receivableMap = new Map(safeReceivableRows.map(row => [String(row.salesman_id ?? 'none'), row]))
@@ -2794,11 +3439,16 @@ function MarketingReceivableOverview({ marketingRows = [], receivableRows = [], 
     const previousAmount = Number(marketing.previous_amount || 0)
     const receivableAmount = Number(receivable.amount || 0)
     const dueAmount = Number(receivable.due_amount || 0)
+    const targetYtd = Number(marketing.target_ytd || 0)
     return {
       ...marketing,
       salesman_id: marketing.id,
       current_amount: currentAmount,
       previous_amount: previousAmount,
+      target_ytd: targetYtd,
+      target_year_total: Number(marketing.target_year_total || 0),
+      target_achievement_pct: targetYtd ? (currentAmount / targetYtd) * 100 : (currentAmount > 0 ? 100 : 0),
+      target_gap_amount: currentAmount - targetYtd,
       receivable_amount: receivableAmount,
       due_amount: dueAmount,
       not_due_amount: Number(receivable.not_due_amount || 0),
@@ -2819,6 +3469,10 @@ function MarketingReceivableOverview({ marketingRows = [], receivableRows = [], 
       customers: [],
       current_amount: 0,
       previous_amount: 0,
+      target_ytd: 0,
+      target_year_total: 0,
+      target_achievement_pct: 0,
+      target_gap_amount: 0,
       achievement_pct: 0,
       receivable_amount: Number(receivable.amount || 0),
       due_amount: Number(receivable.due_amount || 0),
@@ -2842,43 +3496,110 @@ function MarketingReceivableOverview({ marketingRows = [], receivableRows = [], 
   const previousYear = combinedRows[0]?.previous_year || currentYear - 1
   const totalCurrent = combinedRows.reduce((sum, row) => sum + row.current_amount, 0)
   const totalPrevious = combinedRows.reduce((sum, row) => sum + row.previous_amount, 0)
+  const totalTargetYtd = combinedRows.reduce((sum, row) => sum + Number(row.target_ytd || 0), 0)
+  const totalTargetGap = totalCurrent - totalTargetYtd
+  const targetAchievementPct = totalTargetYtd ? (totalCurrent / totalTargetYtd) * 100 : (totalCurrent > 0 ? 100 : 0)
   const totalReceivable = safeReceivableRows.reduce((sum, row) => sum + Number(row.amount || 0), 0)
   const totalDue = safeReceivableRows.reduce((sum, row) => sum + Number(row.due_amount || 0), 0)
-  const growthPct = totalPrevious ? ((totalCurrent - totalPrevious) / totalPrevious) * 100 : (totalCurrent > 0 ? 100 : 0)
   const dueRatio = totalReceivable ? (totalDue / totalReceivable) * 100 : 0
-  const maxSales = Math.max(...combinedRows.flatMap(row => [row.current_amount, row.previous_amount]), 1)
+  const maxSales = Math.max(...combinedRows.flatMap(row => [row.current_amount, row.previous_amount, Number(row.target_ytd || 0)]), 1)
   const maxReceivable = Math.max(...combinedRows.map(row => row.receivable_amount), 1)
 
-  const selectedCustomerRows = useMemo(() => {
-    if (!selectedSales) return []
-    const salesCustomerMap = new Map((selectedSales.customers || []).map(customer => [
-      String(customer.customer_id || customer.customer_name),
-      customer,
-    ]))
-    const receivableCustomerMap = new Map((selectedSales.receivable_customers || []).map(customer => [
-      String(customer.customer_id || customer.customer_name),
-      customer,
-    ]))
-    return Array.from(new Set([...salesCustomerMap.keys(), ...receivableCustomerMap.keys()])).map(key => {
-      const salesCustomer = salesCustomerMap.get(key) || {}
-      const receivableCustomer = receivableCustomerMap.get(key) || {}
-      return {
-        key,
-        customer_no: salesCustomer.customer_no || receivableCustomer.customer_no || '',
-        customer_name: salesCustomer.customer_name || receivableCustomer.customer_name || 'Tanpa Customer',
-        current_amount: Number(salesCustomer.current_amount || 0),
-        previous_amount: Number(salesCustomer.previous_amount || 0),
-        receivable_amount: Number(receivableCustomer.amount || 0),
-        due_amount: Number(receivableCustomer.due_amount || 0),
-        oldest_overdue_days: Number(receivableCustomer.oldest_overdue_days || 0),
-      }
-    }).sort((a, b) => (b.due_amount - a.due_amount) || (b.current_amount - a.current_amount))
-  }, [selectedSales])
+  const selectedCustomerRows = useMemo(() => buildSalesCustomerRows(selectedSales), [selectedSales])
+
+  const exportMarketingRisk = () => {
+    if (!combinedRows.length) {
+      message.warning('Belum ada data Kinerja Marketing untuk diekspor')
+      return
+    }
+    const customerRows = combinedRows.flatMap(sales => buildSalesCustomerRows(sales).map(customer => ({
+      salesman: sales.name || 'Tanpa Salesman',
+      ...customer,
+    })))
+    const invoiceRows = customerRows.flatMap(customer => (
+      (customer.invoices || []).map(invoice => ({
+        salesman: customer.salesman,
+        customer_no: customer.customer_no || '',
+        customer_name: customer.customer_name || '',
+        ...invoice,
+      }))
+    ))
+    downloadWorkbookXLS([
+      {
+        name: 'Kinerja per Sales',
+        rows: combinedRows,
+        columns: [
+          { key: 'name', label: 'Sales / Marketing' },
+          { key: 'customer_count', label: 'Jumlah Customer', type: 'number' },
+          { key: 'previous_amount', label: `Sales ${previousYear}`, type: 'number' },
+          { key: 'current_amount', label: `Sales ${currentYear} YTD`, type: 'number' },
+          { key: 'target_ytd', label: `Target ${currentYear} YTD`, type: 'number' },
+          { key: 'target_achievement_pct', label: 'Achv Target %', type: 'number' },
+          { key: 'target_gap_amount', label: 'Gap Target', type: 'number' },
+          { key: 'achievement_pct', label: `Achv vs ${previousYear} %`, type: 'number' },
+          { key: 'receivable_amount', label: 'Total Piutang', type: 'number' },
+          { key: 'due_amount', label: 'Jatuh Tempo', type: 'number' },
+          { key: 'not_due_amount', label: 'Belum Tempo', type: 'number' },
+          { key: 'due_ratio', label: 'Rasio Jatuh Tempo %', type: 'number' },
+          { key: 'invoice_count', label: 'Jumlah Invoice', type: 'number' },
+          { key: 'oldest_overdue_days', label: 'Overdue Tertua (Hari)', type: 'number' },
+        ],
+      },
+      {
+        name: 'Kinerja per Customer',
+        rows: customerRows,
+        columns: [
+          { key: 'salesman', label: 'Sales / Marketing' },
+          { key: 'customer_no', label: 'No Customer' },
+          { key: 'customer_name', label: 'Customer' },
+          { key: 'previous_amount', label: `Sales ${previousYear}`, type: 'number' },
+          { key: 'current_amount', label: `Sales ${currentYear} YTD`, type: 'number' },
+          { key: 'receivable_amount', label: 'Total Piutang', type: 'number' },
+          { key: 'due_amount', label: 'Jatuh Tempo', type: 'number' },
+          { key: 'not_due_amount', label: 'Belum Tempo', type: 'number' },
+          { key: 'oldest_overdue_days', label: 'Overdue Tertua (Hari)', type: 'number' },
+        ],
+      },
+      {
+        name: 'Invoice Piutang',
+        rows: invoiceRows,
+        columns: [
+          { key: 'salesman', label: 'Sales / Marketing' },
+          { key: 'customer_no', label: 'No Customer' },
+          { key: 'customer_name', label: 'Customer' },
+          { key: 'no_faktur', label: 'No Faktur' },
+          { key: 'tgl_faktur', label: 'Tanggal Faktur', type: 'date' },
+          { key: 'due_date', label: 'Jatuh Tempo', type: 'date' },
+          { key: 'no_po', label: 'No PO' },
+          { key: 'no_pesanan', label: 'No SO' },
+          { key: 'terhutang', label: 'Belum Bayar', type: 'number' },
+          { key: 'overdue_days', label: 'Overdue (Hari)', type: 'number' },
+          { key: 'status_label', label: 'Status' },
+        ],
+      },
+    ], safeFilename('Kinerja Marketing dan Risiko Piutang'))
+  }
+
+  const printSalesReport = sales => {
+    setPrintSales(sales)
+    window.setTimeout(() => window.print(), 100)
+  }
+
+  useEffect(() => {
+    const clearPrintSales = () => setPrintSales(null)
+    window.addEventListener('afterprint', clearPrintSales)
+    return () => window.removeEventListener('afterprint', clearPrintSales)
+  }, [])
 
   return (
     <Card
       title={<span><TrophyOutlined style={{ color: purple }} /> Kinerja Marketing & Risiko Piutang</span>}
-      extra={<Text type="secondary">Klik sales untuk detail customer</Text>}
+      extra={(
+        <Space wrap>
+          <Text type="secondary">Klik sales untuk detail customer</Text>
+          <Button icon={<FileExcelOutlined />} onClick={exportMarketingRisk} disabled={!combinedRows.length}>Export XLS</Button>
+        </Space>
+      )}
       loading={loading}
       style={{
         borderRadius: 8,
@@ -2895,7 +3616,8 @@ function MarketingReceivableOverview({ marketingRows = [], receivableRows = [], 
       <Row gutter={[12, 12]} style={{ marginBottom: 18 }}>
         {[
           { label: `Sales ${currentYear} YTD`, value: formatCurrency(totalCurrent), color: cyan },
-          { label: `Growth vs ${previousYear}`, value: `${growthPct.toLocaleString('id-ID', { maximumFractionDigits: 1 })}%`, color: growthPct >= 0 ? green : red },
+          { label: `Target ${currentYear} YTD`, value: formatCurrency(totalTargetYtd), color: green },
+          { label: 'Achv Target', value: `${targetAchievementPct.toLocaleString('id-ID', { maximumFractionDigits: 1 })}% | Gap ${formatCompactCurrency(totalTargetGap)}`, color: targetAchievementPct >= 100 ? green : red },
           { label: 'Total Piutang', value: formatCurrency(totalReceivable), color: purple },
           { label: 'Sudah Jatuh Tempo', value: `${formatCurrency(totalDue)} (${dueRatio.toLocaleString('id-ID', { maximumFractionDigits: 1 })}%)`, color: totalDue > 0 ? red : green },
         ].map(item => (
@@ -2913,13 +3635,24 @@ function MarketingReceivableOverview({ marketingRows = [], receivableRows = [], 
           const ranking = ((salesPage - 1) * MARKETING_SALES_PAGE_SIZE) + index
           const currentPct = Math.max((row.current_amount / maxSales) * 100, row.current_amount ? 2 : 0)
           const previousPct = Math.max((row.previous_amount / maxSales) * 100, row.previous_amount ? 2 : 0)
+          const targetPct = Math.max((Number(row.target_ytd || 0) / maxSales) * 100, Number(row.target_ytd || 0) ? 2 : 0)
           const receivablePct = Math.max((row.receivable_amount / maxReceivable) * 100, row.receivable_amount ? 2 : 0)
-          const achievement = Number(row.achievement_pct || 0)
+          const achievement = Number(row.target_achievement_pct || 0)
           return (
-            <button
-              type="button"
+            <div
+              role="button"
+              tabIndex={0}
               key={row.id}
-              onClick={() => setSelectedSales(row)}
+              onClick={() => {
+                setCustomerDetailPage(1)
+                setSelectedSales(row)
+              }}
+              onKeyDown={event => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  setCustomerDetailPage(1)
+                  setSelectedSales(row)
+                }
+              }}
               style={{
                 width: '100%',
                 border: 0,
@@ -2931,14 +3664,14 @@ function MarketingReceivableOverview({ marketingRows = [], receivableRows = [], 
                 boxShadow: `inset 0 0 0 1px ${ranking === 0 ? `${cyan}2b` : 'rgba(226,231,240,0.78)'}`,
               }}
             >
-              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(150px, 0.7fr) minmax(260px, 1.5fr) minmax(230px, 1.1fr)', gap: 16, alignItems: 'center' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(150px, 0.7fr) minmax(260px, 1.5fr) minmax(230px, 1.1fr) auto', gap: 16, alignItems: 'center' }}>
                 <div style={{ minWidth: 0 }}>
                   <Text strong ellipsis style={{ display: 'block', color: '#20243a' }}>{ranking + 1}. {row.name || 'Tanpa Salesman'}</Text>
                   <Text type="secondary" style={{ fontSize: 11 }}>{formatNumber(row.customer_count)} customer</Text>
                 </div>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginBottom: 5 }}>
-                    <Text type="secondary" style={{ fontSize: 11 }}>Sales YTD {formatCompactCurrency(row.current_amount)}</Text>
+                    <Text type="secondary" style={{ fontSize: 11 }}>Sales YTD {formatCompactCurrency(row.current_amount)} / Target {formatCompactCurrency(row.target_ytd)}</Text>
                     <Tag color={achievement >= 100 ? 'green' : 'orange'} style={{ marginInlineEnd: 0 }}>{achievement.toLocaleString('id-ID', { maximumFractionDigits: 1 })}%</Tag>
                   </div>
                   <Tooltip title={`${currentYear}: ${formatCurrency(row.current_amount)}`}>
@@ -2951,6 +3684,14 @@ function MarketingReceivableOverview({ marketingRows = [], receivableRows = [], 
                       <div style={{ width: `${previousPct}%`, height: '100%', borderRadius: 999, background: orange }} />
                     </div>
                   </Tooltip>
+                  <Tooltip title={`Target ${currentYear} YTD: ${formatCurrency(row.target_ytd)}`}>
+                    <div style={{ height: 5, marginTop: 4, borderRadius: 999, background: '#edf2f7', overflow: 'hidden' }}>
+                      <div style={{ width: `${targetPct}%`, height: '100%', borderRadius: 999, background: green }} />
+                    </div>
+                  </Tooltip>
+                  <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 10 }}>
+                    Gap target {formatCompactCurrency(row.target_gap_amount)}
+                  </Text>
                 </div>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, marginBottom: 5 }}>
@@ -2968,8 +3709,18 @@ function MarketingReceivableOverview({ marketingRows = [], receivableRows = [], 
                     <div style={{ width: `${Math.min(Math.max(row.due_ratio, 0), 100)}%`, height: '100%', borderRadius: 999, background: red }} />
                   </div>
                 </div>
+                <Button
+                  type="primary"
+                  icon={<PrinterOutlined />}
+                  onClick={event => {
+                    event.stopPropagation()
+                    printSalesReport(row)
+                  }}
+                >
+                  Print
+                </Button>
               </div>
-            </button>
+            </div>
           )
         })}
         {combinedRows.length === 0 && <Text type="secondary">Belum ada data marketing pada periode ini.</Text>}
@@ -2990,20 +3741,38 @@ function MarketingReceivableOverview({ marketingRows = [], receivableRows = [], 
       <Space wrap size={16} style={{ marginTop: 14 }}>
         <Text type="secondary" style={{ fontSize: 11 }}><span style={{ display: 'inline-block', width: 9, height: 9, marginRight: 5, borderRadius: 999, background: cyan }} />Sales {currentYear}</Text>
         <Text type="secondary" style={{ fontSize: 11 }}><span style={{ display: 'inline-block', width: 9, height: 9, marginRight: 5, borderRadius: 999, background: orange }} />Sales {previousYear}</Text>
+        <Text type="secondary" style={{ fontSize: 11 }}><span style={{ display: 'inline-block', width: 9, height: 9, marginRight: 5, borderRadius: 999, background: green }} />Target {currentYear} YTD</Text>
         <Text type="secondary" style={{ fontSize: 11 }}><span style={{ display: 'inline-block', width: 9, height: 9, marginRight: 5, borderRadius: 999, background: purple }} />Total piutang</Text>
         <Text type="secondary" style={{ fontSize: 11 }}><span style={{ display: 'inline-block', width: 9, height: 9, marginRight: 5, borderRadius: 999, background: red }} />Porsi jatuh tempo</Text>
       </Space>
 
       <Modal
         open={Boolean(selectedSales)}
-        onCancel={() => setSelectedSales(null)}
+        onCancel={() => {
+          setSelectedSales(null)
+          setCustomerDetailPage(1)
+        }}
         footer={null}
         width="92vw"
-        title={`Kinerja & Piutang ${selectedSales?.name || ''}`}
+        title={(
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingRight: 32 }}>
+            <span>{`Kinerja & Piutang ${selectedSales?.name || ''}`}</span>
+            <Button
+              type="primary"
+              icon={<PrinterOutlined />}
+              onClick={() => printSalesReport(selectedSales)}
+            >
+              Print Laporan Sales
+            </Button>
+          </div>
+        )}
       >
         <Row gutter={[10, 10]} style={{ marginBottom: 12 }}>
           {[
             { label: `Sales ${currentYear} YTD`, value: formatCurrency(selectedSales?.current_amount), color: cyan },
+            { label: `Target ${currentYear} YTD`, value: formatCurrency(selectedSales?.target_ytd), color: green },
+            { label: 'Achv Target', value: `${Number(selectedSales?.target_achievement_pct || 0).toLocaleString('id-ID', { maximumFractionDigits: 1 })}%`, color: Number(selectedSales?.target_achievement_pct || 0) >= 100 ? green : red },
+            { label: 'Gap Target', value: formatCurrency(selectedSales?.target_gap_amount), color: Number(selectedSales?.target_gap_amount || 0) >= 0 ? green : red },
             { label: `Sales ${previousYear}`, value: formatCurrency(selectedSales?.previous_amount), color: orange },
             { label: 'Total Piutang', value: formatCurrency(selectedSales?.receivable_amount), color: purple },
             { label: 'Jatuh Tempo', value: formatCurrency(selectedSales?.due_amount), color: red },
@@ -3020,9 +3789,21 @@ function MarketingReceivableOverview({ marketingRows = [], receivableRows = [], 
           rowKey="key"
           size="small"
           dataSource={selectedCustomerRows}
-          pagination={{ pageSize: 10, showSizeChanger: false }}
-          scroll={{ x: 1000, y: 460 }}
+          pagination={{
+            current: customerDetailPage,
+            pageSize: 10,
+            showSizeChanger: false,
+            onChange: setCustomerDetailPage,
+          }}
+          scroll={{ x: 1058, y: 460 }}
           columns={[
+            {
+              title: 'No.',
+              width: 58,
+              fixed: 'left',
+              align: 'center',
+              render: (_, __, index) => ((customerDetailPage - 1) * 10) + index + 1,
+            },
             { title: 'No Customer', dataIndex: 'customer_no', width: 125, fixed: 'left', render: value => value || '-' },
             { title: 'Customer', dataIndex: 'customer_name', width: 250, fixed: 'left', ellipsis: true },
             { title: `Sales ${previousYear}`, dataIndex: 'previous_amount', width: 150, align: 'right', render: formatCurrency },
@@ -3033,23 +3814,81 @@ function MarketingReceivableOverview({ marketingRows = [], receivableRows = [], 
           ]}
         />
       </Modal>
+      <SalesPerformancePrintSheet sales={printSales} />
     </Card>
   )
 }
 
 function MarketingCustomerPerformance({ rows = [], loading }) {
   const [selectedMarketing, setSelectedMarketing] = useState(null)
+  const [printMarketing, setPrintMarketing] = useState(null)
+  const [detailPage, setDetailPage] = useState(1)
   const safeRows = Array.isArray(rows) ? rows : []
   const totalCustomers = safeRows.reduce((sum, row) => sum + Number(row.customer_count || 0), 0)
+  const totalInactiveCustomers = safeRows.reduce((sum, row) => sum + Number(row.inactive_customer_count || 0), 0)
+  const totalPreviousOrderingCustomers = safeRows.reduce((sum, row) => sum + Number(row.previous_order_customer_count || 0), 0)
+  const totalOrderingCustomers = safeRows.reduce((sum, row) => sum + Number(row.current_order_customer_count || 0), 0)
   const totalPrevious = safeRows.reduce((sum, row) => sum + Number(row.previous_amount || 0), 0)
   const totalCurrent = safeRows.reduce((sum, row) => sum + Number(row.current_amount || 0), 0)
-  const totalRemaining = Math.max(totalPrevious - totalCurrent, 0)
+  const totalTargetYtd = safeRows.reduce((sum, row) => sum + Number(row.target_ytd || 0), 0)
+  const totalTargetGap = totalCurrent - totalTargetYtd
   const totalAchievement = totalPrevious ? (totalCurrent / totalPrevious) * 100 : (totalCurrent > 0 ? 100 : 0)
+  const totalTargetAchievement = totalTargetYtd ? (totalCurrent / totalTargetYtd) * 100 : (totalCurrent > 0 ? 100 : 0)
   const currentYear = safeRows[0]?.year || dayjs().year()
   const previousYear = safeRows[0]?.previous_year || currentYear - 1
   const currentPeriodLabel = safeRows[0]?.current_to ? dayjs(safeRows[0].current_to).format('DD MMM YYYY') : 'periode berjalan'
   const textSorter = key => (a, b) => String(a?.[key] || '').localeCompare(String(b?.[key] || ''), 'id-ID', { numeric: true, sensitivity: 'base' })
   const numberSorter = key => (a, b) => Number(a?.[key] || 0) - Number(b?.[key] || 0)
+
+  const exportMarketingCustomer = () => {
+    if (!safeRows.length) {
+      message.warning('Belum ada data Performance Marketing untuk diekspor')
+      return
+    }
+    const customerRows = safeRows.flatMap(marketing => (
+      (marketing.customers || []).map(customer => ({
+        marketing: marketing.name || 'Tanpa Salesman',
+        ...customer,
+      }))
+    ))
+    downloadWorkbookXLS([
+      {
+        name: 'Ringkasan Marketing',
+        rows: safeRows,
+        columns: [
+          { key: 'name', label: 'Marketing' },
+          { key: 'customer_count', label: 'Customer Aktif', type: 'number' },
+          { key: 'inactive_customer_count', label: 'Customer Tidak Aktif', type: 'number' },
+          { key: 'previous_order_customer_count', label: `Customer Order ${previousYear}`, type: 'number' },
+          { key: 'current_order_customer_count', label: `Customer Order ${currentYear}`, type: 'number' },
+          { key: 'previous_amount', label: `Sales ${previousYear}`, type: 'number' },
+          { key: 'current_amount', label: `Sales ${currentYear} YTD`, type: 'number' },
+          { key: 'target_ytd', label: `Target ${currentYear} YTD`, type: 'number' },
+          { key: 'target_achievement_pct', label: 'Achv Target %', type: 'number' },
+          { key: 'target_gap_amount', label: 'Gap Target', type: 'number' },
+          { key: 'achievement_pct', label: `Achv vs ${previousYear} %`, type: 'number' },
+          { key: 'diff_amount', label: 'Selisih', type: 'number' },
+          { key: 'zero_with_previous_count', label: 'Customer Belum Sales', type: 'number' },
+        ],
+      },
+      {
+        name: 'Detail Customer',
+        rows: customerRows,
+        columns: [
+          { key: 'marketing', label: 'Marketing' },
+          { key: 'customer_no', label: 'No Customer' },
+          { key: 'customer_name', label: 'Customer' },
+          { key: 'previous_amount', label: `Sales ${previousYear}`, type: 'number' },
+          { key: 'current_amount', label: `Sales ${currentYear} YTD`, type: 'number' },
+          { key: 'achievement_pct', label: 'Pencapaian %', type: 'number' },
+          { key: 'diff_amount', label: 'Selisih', type: 'number' },
+          { key: 'previous_so_count', label: `SO ${previousYear}`, type: 'number' },
+          { key: 'current_so_count', label: `SO ${currentYear}`, type: 'number' },
+          { key: 'status', label: 'Status' },
+        ],
+      },
+    ], safeFilename('Performance Marketing per Customer'))
+  }
 
   const statusColor = status => ({
     Achieved: 'green',
@@ -3059,6 +3898,17 @@ function MarketingCustomerPerformance({ rows = [], loading }) {
     'Tidak Ada Sales': 'default',
   }[status] || 'default')
 
+  const printCustomerPerformance = marketing => {
+    setPrintMarketing(marketing)
+    window.setTimeout(() => window.print(), 100)
+  }
+
+  useEffect(() => {
+    const clearPrintMarketing = () => setPrintMarketing(null)
+    window.addEventListener('afterprint', clearPrintMarketing)
+    return () => window.removeEventListener('afterprint', clearPrintMarketing)
+  }, [])
+
   const summaryColumns = [
     {
       title: 'Marketing',
@@ -3067,18 +3917,45 @@ function MarketingCustomerPerformance({ rows = [], loading }) {
       fixed: 'left',
       sorter: textSorter('name'),
       render: (value, record) => (
-        <Button type="link" onClick={() => setSelectedMarketing(record)} style={{ padding: 0, fontWeight: 700 }}>
+        <Button
+          type="link"
+          onClick={() => {
+            setDetailPage(1)
+            setSelectedMarketing(record)
+          }}
+          style={{ padding: 0, fontWeight: 700 }}
+        >
           {value || 'Tanpa Salesman'}
         </Button>
       ),
     },
-    { title: 'Customer', dataIndex: 'customer_count', width: 90, align: 'center', sorter: numberSorter('customer_count'), render: value => formatNumber(value) },
+    { title: 'Customer Aktif', dataIndex: 'customer_count', width: 110, align: 'center', sorter: numberSorter('customer_count'), render: value => formatNumber(value) },
+    { title: 'Customer Tidak Aktif', dataIndex: 'inactive_customer_count', width: 125, align: 'center', sorter: numberSorter('inactive_customer_count'), render: value => <Tag color={Number(value || 0) > 0 ? 'default' : 'green'}>{formatNumber(value)}</Tag> },
+    { title: `Customer Order ${previousYear}`, dataIndex: 'previous_order_customer_count', width: 135, align: 'center', sorter: numberSorter('previous_order_customer_count'), render: value => <Tag color={Number(value || 0) > 0 ? 'orange' : 'default'}>{formatNumber(value)}</Tag> },
+    { title: `Customer Order ${currentYear}`, dataIndex: 'current_order_customer_count', width: 135, align: 'center', sorter: numberSorter('current_order_customer_count'), render: value => <Tag color={Number(value || 0) > 0 ? 'blue' : 'default'}>{formatNumber(value)}</Tag> },
     { title: `Sales ${previousYear}`, dataIndex: 'previous_amount', width: 150, align: 'right', sorter: numberSorter('previous_amount'), render: value => formatCurrency(value) },
     { title: `Sales ${currentYear} YTD`, dataIndex: 'current_amount', width: 160, align: 'right', sorter: numberSorter('current_amount'), render: value => formatCurrency(value) },
+    { title: `Target ${currentYear} YTD`, dataIndex: 'target_ytd', width: 160, align: 'right', sorter: numberSorter('target_ytd'), render: value => <Text style={{ color: green }}>{formatCurrency(value)}</Text> },
     {
-      title: 'Achv',
+      title: 'Achv Target',
+      dataIndex: 'target_achievement_pct',
+      width: 112,
+      align: 'right',
+      sorter: numberSorter('target_achievement_pct'),
+      render: value => <Tag color={Number(value || 0) >= 100 ? 'green' : 'orange'}>{Number(value || 0).toLocaleString('id-ID', { maximumFractionDigits: 1 })}%</Tag>,
+    },
+    {
+      title: 'Gap Target',
+      dataIndex: 'target_gap_amount',
+      width: 145,
+      align: 'right',
+      sorter: numberSorter('target_gap_amount'),
+      render: value => <Text style={{ color: Number(value || 0) >= 0 ? green : red }}>{formatCurrency(value)}</Text>,
+    },
+    {
+      title: `Achv vs ${previousYear}`,
       dataIndex: 'achievement_pct',
-      width: 95,
+      width: 115,
       align: 'right',
       sorter: numberSorter('achievement_pct'),
       render: value => <Tag color={Number(value || 0) >= 100 ? 'green' : 'orange'}>{Number(value || 0).toLocaleString('id-ID', { maximumFractionDigits: 1 })}%</Tag>,
@@ -3092,9 +3969,26 @@ function MarketingCustomerPerformance({ rows = [], loading }) {
       render: value => <Text style={{ color: Number(value || 0) >= 0 ? green : red }}>{formatCurrency(value)}</Text>,
     },
     { title: 'Belum Sales', dataIndex: 'zero_with_previous_count', width: 105, align: 'center', sorter: numberSorter('zero_with_previous_count'), render: value => value ? <Tag color="red">{formatNumber(value)}</Tag> : <Tag>0</Tag> },
+    {
+      title: 'Print',
+      width: 95,
+      align: 'center',
+      render: (_, record) => (
+        <Button type="primary" size="small" icon={<PrinterOutlined />} onClick={() => printCustomerPerformance(record)}>
+          Print
+        </Button>
+      ),
+    },
   ]
 
   const detailColumns = [
+    {
+      title: 'No.',
+      width: 58,
+      fixed: 'left',
+      align: 'center',
+      render: (_, __, index) => ((detailPage - 1) * 12) + index + 1,
+    },
     { title: 'No Customer', dataIndex: 'customer_no', width: 125, fixed: 'left', sorter: textSorter('customer_no'), render: value => value || '-' },
     { title: 'Customer', dataIndex: 'customer_name', width: 250, ellipsis: { showTitle: false }, sorter: textSorter('customer_name'), render: value => <Tooltip title={value}>{value || '-'}</Tooltip> },
     { title: `Sales ${previousYear}`, dataIndex: 'previous_amount', width: 145, align: 'right', sorter: numberSorter('previous_amount'), render: value => formatCurrency(value) },
@@ -3115,7 +4009,7 @@ function MarketingCustomerPerformance({ rows = [], loading }) {
       sorter: numberSorter('diff_amount'),
       render: value => <Text style={{ color: Number(value || 0) >= 0 ? green : red }}>{formatCurrency(value)}</Text>,
     },
-    { title: 'SO 2025', dataIndex: 'previous_so_count', width: 80, align: 'center', sorter: numberSorter('previous_so_count'), render: value => formatNumber(value) },
+    { title: `SO ${previousYear}`, dataIndex: 'previous_so_count', width: 80, align: 'center', sorter: numberSorter('previous_so_count'), render: value => formatNumber(value) },
     { title: `SO ${currentYear}`, dataIndex: 'current_so_count', width: 85, align: 'center', sorter: numberSorter('current_so_count'), render: value => formatNumber(value) },
     { title: 'Status', dataIndex: 'status', width: 130, sorter: textSorter('status'), render: value => <Tag color={statusColor(value)}>{value}</Tag> },
   ]
@@ -3131,15 +4025,25 @@ function MarketingCustomerPerformance({ rows = [], loading }) {
         background: 'linear-gradient(135deg, rgba(255,255,255,0.98) 0%, rgba(247,252,251,0.92) 100%)',
         boxShadow: '0 14px 34px rgba(23,28,51,0.045)',
       }}
-      extra={<Text type="secondary">{previousYear} Jan-Des vs {currentYear} Jan-{currentPeriodLabel}</Text>}
+      extra={(
+        <Space wrap>
+          <Text type="secondary">{previousYear} Jan-Des vs {currentYear} Jan-{currentPeriodLabel}</Text>
+          <Button icon={<FileExcelOutlined />} onClick={exportMarketingCustomer} disabled={!safeRows.length}>Export XLS</Button>
+        </Space>
+      )}
     >
       <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
-        <Col xs={24} sm={12} xl={4}><Statistic title="Total Marketing" value={safeRows.length} valueStyle={{ color: purple, fontSize: 20 }} /></Col>
-        <Col xs={24} sm={12} xl={4}><Statistic title="Total Customer" value={totalCustomers} valueStyle={{ color: cyan, fontSize: 20 }} /></Col>
-        <Col xs={24} sm={12} xl={4}><Statistic title={`Sales ${previousYear} Jan-Des`} value={formatCurrency(totalPrevious)} valueStyle={{ color: orange, fontSize: 20 }} /></Col>
-        <Col xs={24} sm={12} xl={4}><Statistic title={`Sales ${currentYear} YTD`} value={formatCurrency(totalCurrent)} valueStyle={{ color: cyan, fontSize: 20 }} /></Col>
-        <Col xs={24} sm={12} xl={4}><Statistic title={`Achv ${currentYear} YTD`} value={totalAchievement.toLocaleString('id-ID', { maximumFractionDigits: 1 })} suffix="%" valueStyle={{ color: totalAchievement >= 100 ? green : red, fontSize: 20 }} /></Col>
-        <Col xs={24} sm={12} xl={4}><Statistic title="Masih Kurang" value={formatCurrency(totalRemaining)} valueStyle={{ color: totalRemaining > 0 ? red : green, fontSize: 20 }} /></Col>
+        <Col xs={24} sm={12} xl={6}><Statistic title="Total Marketing" value={safeRows.length} valueStyle={{ color: purple, fontSize: 20 }} /></Col>
+        <Col xs={24} sm={12} xl={6}><Statistic title="Customer Aktif" value={totalCustomers} valueStyle={{ color: purple, fontSize: 20 }} /></Col>
+        <Col xs={24} sm={12} xl={6}><Statistic title="Customer Tidak Aktif" value={totalInactiveCustomers} valueStyle={{ color: '#697087', fontSize: 20 }} /></Col>
+        <Col xs={24} sm={12} xl={6}><Statistic title={`Customer Order ${previousYear} Jan-Des`} value={totalPreviousOrderingCustomers} valueStyle={{ color: orange, fontSize: 20 }} /></Col>
+        <Col xs={24} sm={12} xl={6}><Statistic title={`Customer Order ${currentYear} YTD`} value={totalOrderingCustomers} valueStyle={{ color: cyan, fontSize: 20 }} /></Col>
+        <Col xs={24} sm={12} xl={6}><Statistic title={`Sales ${previousYear} Jan-Des`} value={formatCurrency(totalPrevious)} valueStyle={{ color: orange, fontSize: 20 }} /></Col>
+        <Col xs={24} sm={12} xl={6}><Statistic title={`Sales ${currentYear} YTD`} value={formatCurrency(totalCurrent)} valueStyle={{ color: cyan, fontSize: 20 }} /></Col>
+        <Col xs={24} sm={12} xl={6}><Statistic title={`Target ${currentYear} YTD`} value={formatCurrency(totalTargetYtd)} valueStyle={{ color: green, fontSize: 20 }} /></Col>
+        <Col xs={24} sm={12} xl={6}><Statistic title="Achv Target" value={totalTargetAchievement.toLocaleString('id-ID', { maximumFractionDigits: 1 })} suffix="%" valueStyle={{ color: totalTargetAchievement >= 100 ? green : red, fontSize: 20 }} /></Col>
+        <Col xs={24} sm={12} xl={6}><Statistic title="Gap Target" value={formatCurrency(totalTargetGap)} valueStyle={{ color: totalTargetGap >= 0 ? green : red, fontSize: 20 }} /></Col>
+        <Col xs={24} sm={12} xl={6}><Statistic title={`Achv vs ${previousYear}`} value={totalAchievement.toLocaleString('id-ID', { maximumFractionDigits: 1 })} suffix="%" valueStyle={{ color: totalAchievement >= 100 ? green : red, fontSize: 20 }} /></Col>
       </Row>
       <Table
         rowKey="id"
@@ -3147,21 +4051,41 @@ function MarketingCustomerPerformance({ rows = [], loading }) {
         columns={summaryColumns}
         dataSource={safeRows}
         pagination={{ pageSize: 8, showSizeChanger: false }}
-        scroll={{ x: 1065 }}
+        scroll={{ x: 1980 }}
       />
       <Modal
         open={!!selectedMarketing}
-        onCancel={() => setSelectedMarketing(null)}
+        onCancel={() => {
+          setSelectedMarketing(null)
+          setDetailPage(1)
+        }}
         footer={null}
         width="92vw"
-        title={`Detail Customer ${selectedMarketing?.name || ''}`}
+        title={(
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingRight: 32 }}>
+            <span>{`Detail Customer ${selectedMarketing?.name || ''}`}</span>
+            <Button type="primary" icon={<PrinterOutlined />} onClick={() => printCustomerPerformance(selectedMarketing)}>
+              Print Performa Customer
+            </Button>
+          </div>
+        )}
       >
         <Space size={[8, 8]} wrap style={{ marginBottom: 12 }}>
-          <Tag color="blue">{formatNumber(selectedMarketing?.customer_count)} customer</Tag>
+          <Tag color="purple">{formatNumber(selectedMarketing?.customer_count)} customer aktif</Tag>
+          <Tag>{formatNumber(selectedMarketing?.inactive_customer_count)} customer tidak aktif</Tag>
+          <Tag color="orange">{formatNumber(selectedMarketing?.previous_order_customer_count)} customer order {previousYear}</Tag>
+          <Tag color="blue">{formatNumber(selectedMarketing?.current_order_customer_count)} customer order {currentYear}</Tag>
           <Tag color="orange">{previousYear}: {formatCurrency(selectedMarketing?.previous_amount)}</Tag>
           <Tag color="cyan">{currentYear} YTD: {formatCurrency(selectedMarketing?.current_amount)}</Tag>
-          <Tag color={Number(selectedMarketing?.achievement_pct || 0) >= 100 ? 'green' : 'red'}>
-            Achv {Number(selectedMarketing?.achievement_pct || 0).toLocaleString('id-ID', { maximumFractionDigits: 1 })}%
+          <Tag color="green">Target {currentYear} YTD: {formatCurrency(selectedMarketing?.target_ytd)}</Tag>
+          <Tag color={Number(selectedMarketing?.target_achievement_pct || 0) >= 100 ? 'green' : 'red'}>
+            Achv Target {Number(selectedMarketing?.target_achievement_pct || 0).toLocaleString('id-ID', { maximumFractionDigits: 1 })}%
+          </Tag>
+          <Tag color={Number(selectedMarketing?.target_gap_amount || 0) >= 0 ? 'green' : 'red'}>
+            Gap Target {formatCurrency(selectedMarketing?.target_gap_amount)}
+          </Tag>
+          <Tag color={Number(selectedMarketing?.achievement_pct || 0) >= 100 ? 'green' : 'orange'}>
+            Achv vs {previousYear} {Number(selectedMarketing?.achievement_pct || 0).toLocaleString('id-ID', { maximumFractionDigits: 1 })}%
           </Tag>
           <Tag color="red">Belum sales: {formatNumber(selectedMarketing?.zero_with_previous_count)}</Tag>
         </Space>
@@ -3170,10 +4094,16 @@ function MarketingCustomerPerformance({ rows = [], loading }) {
           size="small"
           columns={detailColumns}
           dataSource={selectedMarketing?.customers || []}
-          pagination={{ pageSize: 12, showSizeChanger: false }}
-          scroll={{ x: 1195, y: 470 }}
+          pagination={{
+            current: detailPage,
+            pageSize: 12,
+            showSizeChanger: false,
+            onChange: setDetailPage,
+          }}
+          scroll={{ x: 1253, y: 470 }}
         />
       </Modal>
+      <CustomerPerformancePrintSheet marketing={printMarketing} />
       <style>{`
         .marketing-customer-performance-card .ant-card-head {
           border-bottom-color: rgba(226,231,240,0.58);
@@ -3214,6 +4144,7 @@ function MarketingCustomerPerformance({ rows = [], loading }) {
 
 function SalesReceivablesBySalesman({ rows = [], loading }) {
   const [selectedSalesman, setSelectedSalesman] = useState(null)
+  const [printSalesman, setPrintSalesman] = useState(null)
   const safeRows = Array.isArray(rows) ? rows : []
   const textSorter = key => (a, b) => String(a?.[key] || '').localeCompare(String(b?.[key] || ''), 'id-ID', { numeric: true, sensitivity: 'base' })
   const numberSorter = key => (a, b) => Number(a?.[key] || 0) - Number(b?.[key] || 0)
@@ -3224,6 +4155,78 @@ function SalesReceivablesBySalesman({ rows = [], loading }) {
   const totalInvoices = safeRows.reduce((sum, row) => sum + Number(row.invoice_count || 0), 0)
   const totalPo = safeRows.reduce((sum, row) => sum + Number(row.po_count || 0), 0)
 
+  const exportSalesReceivables = () => {
+    if (!safeRows.length) {
+      message.warning('Belum ada data Piutang Customer untuk diekspor')
+      return
+    }
+    const customerRows = safeRows.flatMap(sales => (
+      (sales.customers || []).map(customer => ({
+        salesman_name: sales.salesman_name || 'Tanpa Marketing',
+        ...customer,
+      }))
+    ))
+    const invoiceRows = customerRows.flatMap(customer => (
+      (customer.invoices || []).map(invoice => ({
+        salesman_name: customer.salesman_name,
+        customer_no: customer.customer_no || '',
+        customer_name: customer.customer_name || '',
+        ...invoice,
+      }))
+    ))
+    downloadWorkbookXLS([
+      {
+        name: 'Piutang per Sales',
+        rows: safeRows,
+        columns: [
+          { key: 'salesman_name', label: 'Sales / Marketing' },
+          { key: 'customer_count', label: 'Customer', type: 'number' },
+          { key: 'po_count', label: 'PO', type: 'number' },
+          { key: 'invoice_count', label: 'Invoice', type: 'number' },
+          { key: 'amount', label: 'Belum Bayar', type: 'number' },
+          { key: 'due_amount', label: 'Jatuh Tempo', type: 'number' },
+          { key: 'not_due_amount', label: 'Belum Tempo', type: 'number' },
+          { key: 'oldest_overdue_days', label: 'Overdue Tertua (Hari)', type: 'number' },
+        ],
+      },
+      {
+        name: 'Piutang per Customer',
+        rows: customerRows,
+        columns: [
+          { key: 'salesman_name', label: 'Sales / Marketing' },
+          { key: 'customer_no', label: 'No Customer' },
+          { key: 'customer_name', label: 'Customer' },
+          { key: 'po_count', label: 'PO', type: 'number' },
+          { key: 'invoice_count', label: 'Invoice', type: 'number' },
+          { key: 'amount', label: 'Belum Bayar', type: 'number' },
+          { key: 'due_amount', label: 'Jatuh Tempo', type: 'number' },
+          { key: 'not_due_amount', label: 'Belum Tempo', type: 'number' },
+          { key: 'oldest_overdue_days', label: 'Overdue Tertua (Hari)', type: 'number' },
+        ],
+      },
+      {
+        name: 'Detail Invoice',
+        rows: invoiceRows,
+        columns: [
+          { key: 'salesman_name', label: 'Sales / Marketing' },
+          { key: 'customer_no', label: 'No Customer' },
+          { key: 'customer_name', label: 'Customer' },
+          { key: 'no_faktur', label: 'No Faktur' },
+          { key: 'tgl_faktur', label: 'Tanggal Faktur', type: 'date' },
+          { key: 'due_date', label: 'Jatuh Tempo', type: 'date' },
+          { key: 'no_po', label: 'No PO' },
+          { key: 'no_pesanan', label: 'No SO' },
+          { key: 'no_pengiriman', label: 'No DO' },
+          { key: 'nilai_faktur', label: 'Nilai Faktur', type: 'number' },
+          { key: 'nilai_terbayar', label: 'Terbayar', type: 'number' },
+          { key: 'terhutang', label: 'Belum Bayar', type: 'number' },
+          { key: 'overdue_days', label: 'Overdue (Hari)', type: 'number' },
+          { key: 'status_label', label: 'Status' },
+        ],
+      },
+    ], safeFilename('Piutang Customer per Sales'))
+  }
+
   const statusTag = record => {
     const status = record?.status
     const label = record?.status_label || '-'
@@ -3231,6 +4234,17 @@ function SalesReceivablesBySalesman({ rows = [], loading }) {
     if (status === 'today') return <Tag color="orange">{label}</Tag>
     return <Tag color="blue">{label}</Tag>
   }
+
+  const printReceivableDetail = salesman => {
+    setPrintSalesman(salesman)
+    window.setTimeout(() => window.print(), 100)
+  }
+
+  useEffect(() => {
+    const clearPrintSalesman = () => setPrintSalesman(null)
+    window.addEventListener('afterprint', clearPrintSalesman)
+    return () => window.removeEventListener('afterprint', clearPrintSalesman)
+  }, [])
 
   const summaryColumns = [
     {
@@ -3258,6 +4272,16 @@ function SalesReceivablesBySalesman({ rows = [], loading }) {
       align: 'center',
       sorter: numberSorter('oldest_overdue_days'),
       render: value => Number(value || 0) > 0 ? <Tag color="red">{formatNumber(value)} hari</Tag> : <Tag>Belum tempo</Tag>,
+    },
+    {
+      title: 'Print',
+      width: 95,
+      align: 'center',
+      render: (_, record) => (
+        <Button type="primary" size="small" icon={<PrinterOutlined />} onClick={() => printReceivableDetail(record)}>
+          Print
+        </Button>
+      ),
     },
   ]
 
@@ -3303,7 +4327,12 @@ function SalesReceivablesBySalesman({ rows = [], loading }) {
         background: 'linear-gradient(135deg, rgba(255,255,255,0.98) 0%, rgba(253,248,249,0.9) 100%)',
         boxShadow: '0 14px 34px rgba(23,28,51,0.045)',
       }}
-      extra={<Text type="secondary">{formatNumber(totalInvoices)} invoice belum lunas</Text>}
+      extra={(
+        <Space wrap>
+          <Text type="secondary">{formatNumber(totalInvoices)} invoice belum lunas</Text>
+          <Button icon={<FileExcelOutlined />} onClick={exportSalesReceivables} disabled={!safeRows.length}>Export XLS</Button>
+        </Space>
+      )}
     >
       <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
         <Col xs={24} sm={12} xl={4}><Statistic title="Total Sales" value={safeRows.length} valueStyle={{ color: purple, fontSize: 20 }} /></Col>
@@ -3319,14 +4348,21 @@ function SalesReceivablesBySalesman({ rows = [], loading }) {
         columns={summaryColumns}
         dataSource={safeRows}
         pagination={{ pageSize: 8, showSizeChanger: false }}
-        scroll={{ x: 1185 }}
+        scroll={{ x: 1280 }}
       />
       <Modal
         open={!!selectedSalesman}
         onCancel={() => setSelectedSalesman(null)}
         footer={null}
         width="94vw"
-        title={`Detail Piutang ${selectedSalesman?.salesman_name || ''}`}
+        title={(
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, paddingRight: 32 }}>
+            <span>{`Detail Piutang ${selectedSalesman?.salesman_name || ''}`}</span>
+            <Button type="primary" icon={<PrinterOutlined />} onClick={() => printReceivableDetail(selectedSalesman)}>
+              Print Detail Piutang
+            </Button>
+          </div>
+        )}
       >
         <Space size={[8, 8]} wrap style={{ marginBottom: 12 }}>
           <Tag color="blue">{formatNumber(selectedSalesman?.customer_count)} customer</Tag>
@@ -3357,6 +4393,7 @@ function SalesReceivablesBySalesman({ rows = [], loading }) {
           }}
         />
       </Modal>
+      <ReceivableDetailPrintSheet salesman={printSalesman} />
       <style>{`
         .sales-receivables-card .ant-card-head {
           border-bottom-color: rgba(226,231,240,0.58);
@@ -3389,6 +4426,175 @@ function SalesReceivablesBySalesman({ rows = [], loading }) {
         }
       `}</style>
     </Card>
+  )
+}
+
+function DeliveryModule({ sales = {}, loading }) {
+  const [historyRange, setHistoryRange] = useState(defaultDateRange)
+  const [historyData, setHistoryData] = useState(sales.delivery_history || {})
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [selectedHistory, setSelectedHistory] = useState(null)
+  const history = historyData || sales.delivery_history || {}
+
+  const fetchDeliveryHistory = useCallback(async () => {
+    try {
+      setHistoryLoading(true)
+      const [dateFrom, dateTo] = historyRange
+      const res = await api.get('/api/dashboard-delivery-history', {
+        params: {
+          date_from: dateFrom.format('YYYY-MM-DD'),
+          date_to: dateTo.format('YYYY-MM-DD'),
+        },
+      })
+      setHistoryData(res.data || {})
+    } catch (error) {
+      console.error(error)
+      message.error('Gagal memuat riwayat barang keluar')
+    } finally {
+      setHistoryLoading(false)
+    }
+  }, [historyRange])
+
+  useEffect(() => {
+    fetchDeliveryHistory()
+  }, [fetchDeliveryHistory])
+
+  const historyCards = [
+    {
+      key: 'do',
+      title: 'DO (Pengiriman barang)',
+      count: history.do_count,
+      rows: history.do_rows || [],
+      icon: <FileTextOutlined />,
+      color: cyan,
+      glow: purple,
+    },
+    {
+      key: 'gr',
+      title: 'GR (Barang Pengganti)',
+      count: history.gr_count,
+      rows: history.gr_rows || [],
+      icon: <ToolOutlined />,
+      color: green,
+      glow: orange,
+    },
+    {
+      key: 'sr',
+      title: 'SR (Sample Request)',
+      count: history.sr_count,
+      rows: history.sr_rows || [],
+      icon: <FileDoneOutlined />,
+      color: purple,
+      glow: cyan,
+    },
+    {
+      key: 'packing',
+      title: 'Packing',
+      count: history.packing_count,
+      rows: history.packing_rows || [],
+      icon: <InboxOutlined />,
+      color: orange,
+      glow: green,
+    },
+    {
+      key: 'pemasangan',
+      title: 'Pemasangan',
+      count: history.pemasangan_count,
+      rows: history.pemasangan_rows || [],
+      icon: <CheckCircleOutlined />,
+      color: red,
+      glow: purple,
+    },
+  ]
+  const historyColumns = [
+    { title: 'No', dataIndex: 'no', width: 150, render: value => <Text strong>{value || '-'}</Text> },
+    { title: 'Tanggal', dataIndex: 'tanggal', width: 110, render: value => value ? dayjs(value).format('DD/MM/YYYY') : '-' },
+    { title: 'No PO', dataIndex: 'no_po', width: 150, render: value => value || '-' },
+    { title: 'Nama', dataIndex: 'nama', width: 220, render: value => value || '-' },
+    { title: 'Status', dataIndex: 'status', width: 120, render: value => value || '-' },
+    { title: 'Deskripsi', dataIndex: 'deskripsi', ellipsis: true, render: value => value || '-' },
+  ]
+  return (
+    <>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+      <div>
+        <Text strong style={{ display: 'block', color: '#20243a', fontSize: 15 }}>Riwayat Barang Keluar</Text>
+        <Text type="secondary" style={{ fontSize: 12 }}>Klik card untuk melihat daftar transaksi.</Text>
+      </div>
+      <RangePicker
+        value={historyRange}
+        format="DD/MM/YYYY"
+        allowClear={false}
+        onChange={value => setHistoryRange(value || defaultDateRange())}
+      />
+    </div>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(168px, 1fr))', gap: 12, marginBottom: 16 }}>
+      {historyCards.map(item => (
+        <div key={item.key} style={{ minWidth: 0 }}>
+          <Card
+            hoverable
+            loading={loading || historyLoading}
+            onClick={() => setSelectedHistory(item)}
+            style={{
+              borderRadius: 8,
+              border: softBorder,
+              height: '100%',
+              width: '100%',
+              minHeight: 102,
+              overflow: 'hidden',
+              cursor: 'pointer',
+              position: 'relative',
+              background: `
+                radial-gradient(circle at 88% 18%, ${item.glow}30 0%, transparent 28%),
+                radial-gradient(circle at 10% 92%, ${item.color}18 0%, transparent 34%),
+                linear-gradient(135deg, #ffffff 0%, ${item.color}0d 48%, ${item.glow}12 100%)
+              `,
+            }}
+            styles={{ body: { padding: 14 } }}
+          >
+            <div style={{ position: 'absolute', inset: '0 auto 0 0', width: 4, background: item.color }} />
+            <div style={{ position: 'absolute', right: 12, bottom: 10, color: `${item.color}20`, fontSize: 42, lineHeight: 1 }}>
+              {item.icon}
+            </div>
+            <div style={{ position: 'relative', display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start' }}>
+              <div>
+                <Text type="secondary" style={{ display: 'block', fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 150 }}>
+                  {item.title}
+                </Text>
+                <div style={{ marginTop: 8, color: item.color, fontSize: 24, lineHeight: 1, fontWeight: 900 }}>
+                  {formatNumber(item.count || 0)}
+                </div>
+              </div>
+              <Tag style={{ marginInlineEnd: 0, border: 'none', color: item.color, background: `${item.color}14`, fontWeight: 700, fontSize: 10, paddingInline: 6 }}>
+                Detail
+              </Tag>
+            </div>
+          </Card>
+        </div>
+      ))}
+    </div>
+    <Row gutter={[16, 16]}>
+      <Col xs={24}>
+        <SalesOrderStatusCard status={sales.so_month_status} loading={loading} compact />
+      </Col>
+    </Row>
+    <Modal
+      open={Boolean(selectedHistory)}
+      title={selectedHistory ? `Detail ${selectedHistory.title}` : 'Detail transaksi'}
+      footer={null}
+      width={980}
+      onCancel={() => setSelectedHistory(null)}
+    >
+      <Table
+        size="small"
+        rowKey={(row, index) => `${selectedHistory?.key || 'history'}-${row.no || index}-${index}`}
+        columns={historyColumns}
+        dataSource={selectedHistory?.rows || []}
+        pagination={{ pageSize: 10, showSizeChanger: true }}
+        scroll={{ x: 900 }}
+      />
+    </Modal>
+    </>
   )
 }
 
@@ -3615,23 +4821,14 @@ function SalesModule({ sales, loading, canViewInvoice = true, dateRange }) {
         </Card>
       </Col>
       <Col xs={24}>
-        <SalesOrderStatusCard status={sales.so_month_status} loading={loading} />
-      </Col>
-      <Col xs={24}>
         <SalesDailyReport dateRange={dateRange} />
       </Col>
       <Col xs={24}>
-        <MarketingReceivableOverview
+        <MarketingReportTabs
           marketingRows={sales.marketing_customer_yearly}
           receivableRows={sales.sales_receivables_by_salesman}
           loading={loading}
         />
-      </Col>
-      <Col xs={24}>
-        <MarketingCustomerPerformance rows={sales.marketing_customer_yearly} loading={loading} />
-      </Col>
-      <Col xs={24}>
-        <SalesReceivablesBySalesman rows={sales.sales_receivables_by_salesman} loading={loading} />
       </Col>
       <Col xs={24}>
         <CustomerCityMap rows={sales.customer_cities} loading={loading} />
@@ -4367,6 +5564,7 @@ export default function Dashboard() {
   const summaryRequestRef = useRef(0)
   const canViewStock = hasPermission('stock')
   const canViewSales = hasPermission('penjualan')
+  const canViewDelivery = hasPermission('penjualan_do') || hasPermission('penjualan')
   const canViewPurchasing = hasPermission('pembelian') && user?.role !== 'marketing'
   const canViewAccounting = SHOW_DASHBOARD_ACCOUNTING && hasPermission('akuntansi')
   const canViewInvoice = hasPermission('invoice')
@@ -4493,6 +5691,17 @@ export default function Dashboard() {
           icon={<ShoppingOutlined />}
         >
           <SalesModule sales={summary.sales} loading={loading} canViewInvoice={canViewInvoice} dateRange={dateRange} />
+        </ModuleSection>
+      )}
+
+      {canViewDelivery && (
+        <ModuleSection
+          title="Modul Pengiriman"
+          subtitle="Status SO dan kesiapan pengiriman periode aktif."
+          color={cyan}
+          icon={<FileDoneOutlined />}
+        >
+          <DeliveryModule sales={summary.sales} loading={loading} />
         </ModuleSection>
       )}
 

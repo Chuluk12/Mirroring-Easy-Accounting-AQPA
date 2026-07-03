@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Button, Card, Col, Input, Row, Segmented, Space, Table, Tag, Typography, message } from 'antd'
+import { Button, Card, Col, Input, Row, Segmented, Select, Space, Table, Tag, Typography, message } from 'antd'
 import { ClockCircleOutlined, ExclamationCircleOutlined, FileExcelOutlined, ProjectOutlined, ReloadOutlined, SearchOutlined, StopOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import api from '../../api/client'
@@ -13,6 +13,8 @@ const { Text, Title } = Typography
 const BASE_EXPORT_COLUMNS = [
   { key: 'no', label: 'No', type: 'number' },
   { key: 'no_project', label: 'No. Proyek' },
+  { key: 'nama_project', label: 'Nama Project' },
+  { key: 'nama_kontak', label: 'Nama Kontak' },
   { key: 'deskripsi', label: 'Deskripsi Proyek' },
   { key: 'tanggal_mulai', label: 'Tgl Mulai', type: 'date' },
   { key: 'tanggal_selesai', label: 'Tgl Selesai', type: 'date' },
@@ -20,17 +22,18 @@ const BASE_EXPORT_COLUMNS = [
   { key: 'status', label: 'Status' },
   { key: 'rab', label: 'RAB', type: 'number' },
   { key: 'realisasi', label: 'Realisasi', type: 'number' },
+  { key: 'selisih', label: 'Selisih', type: 'number' },
+  { key: 'value_profit_rab', label: 'Value Profit RAB', type: 'number' },
+  { key: 'profit_rab', label: '% Profit RAB', type: 'number' },
+  { key: 'value_profit_realisasi', label: 'Value Profit Realisasi', type: 'number' },
+  { key: 'profit_realisasi', label: '% Profit Realisasi', type: 'number' },
+  { key: 'remarks', label: 'Remarks' },
 ]
 const MKT_EXPORT_COLUMNS = [
   ...BASE_EXPORT_COLUMNS,
-  { key: 'profit_rab', label: 'Profit RAB %', type: 'number' },
-  { key: 'profit_realisasi', label: 'Profit Realisasi %', type: 'number' },
-  { key: 'selisih', label: 'Selisih', type: 'number' },
 ]
 const GA_EXPORT_COLUMNS = [
   ...BASE_EXPORT_COLUMNS,
-  { key: 'profit_realisasi', label: '%', type: 'number' },
-  { key: 'selisih', label: 'Selisih', type: 'number' },
 ]
 
 const renderDate = value => value ? <Tag color="blue">{dayjs(value).format('DD/MM/YYYY')}</Tag> : '-'
@@ -49,7 +52,47 @@ const getSummary = rows => rows.reduce((acc, row) => ({
   rab: acc.rab + Number(row.rab || 0),
   realisasi: acc.realisasi + Number(row.realisasi || 0),
   selisih: acc.selisih + Number(row.selisih || 0),
-}), { rab: 0, realisasi: 0, selisih: 0 })
+  value_profit_rab: acc.value_profit_rab + Number(row.value_profit_rab || 0),
+  value_profit_realisasi: acc.value_profit_realisasi + Number(row.value_profit_realisasi || 0),
+}), { rab: 0, realisasi: 0, selisih: 0, value_profit_rab: 0, value_profit_realisasi: 0 })
+
+function EditableProjectRemarks({ record, onSaved }) {
+  const [value, setValue] = useState(record.remarks || '')
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => setValue(record.remarks || ''), [record.remarks])
+
+  const save = async () => {
+    const normalized = value.trim()
+    if (normalized === (record.remarks || '').trim()) return
+    setSaving(true)
+    try {
+      const res = await api.post('/api/project/remark', {
+        project_no: record.no_project,
+        remarks: normalized,
+      })
+      onSaved(record.no_project, res.data.data || { remarks: normalized })
+      message.success('Remarks disimpan.')
+    } catch (error) {
+      setValue(record.remarks || '')
+      message.error(error.response?.data?.message || 'Gagal menyimpan remarks.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Input.TextArea
+      value={value}
+      autoSize={{ minRows: 1, maxRows: 3 }}
+      maxLength={500}
+      placeholder="Input remarks"
+      status={saving ? 'warning' : undefined}
+      onChange={event => setValue(event.target.value)}
+      onBlur={save}
+    />
+  )
+}
 
 export default function DaftarProject() {
   const navigate = useNavigate()
@@ -61,6 +104,8 @@ export default function DaftarProject() {
   const [projectType, setProjectType] = useState('mkt')
   const [projectStatus, setProjectStatus] = useState('all')
   const [progress, setProgress] = useState('')
+  const [contactName, setContactName] = useState('')
+  const [contactOptions, setContactOptions] = useState([])
   const [dashboardSummary, setDashboardSummary] = useState({
     total_project: 0,
     unfinished_project: 0,
@@ -78,6 +123,7 @@ export default function DaftarProject() {
           status: projectStatus,
           project_type: projectType,
           progress,
+          contact_name: projectType === 'mkt' ? contactName : '',
           limit: pageSize,
           offset: (page - 1) * pageSize,
         },
@@ -96,23 +142,52 @@ export default function DaftarProject() {
     } finally {
       setLoading(false)
     }
-  }, [pagination.current, pagination.pageSize, search, projectType, projectStatus, progress])
+  }, [pagination.current, pagination.pageSize, search, projectType, projectStatus, progress, contactName])
+
+  useEffect(() => {
+    if (projectType !== 'mkt') return
+    api.get('/api/project/contact-options')
+      .then(res => setContactOptions(res.data.data || []))
+      .catch(() => setContactOptions([]))
+  }, [projectType])
 
   useEffect(() => {
     fetchData(1, pagination.pageSize)
   }, [fetchData, pagination.pageSize])
 
-  const handleExport = async () => {
-    setExporting(true)
-    try {
-      const res = await api.get('/api/project/export', { params: { search, status: projectStatus, project_type: projectType, progress } })
-      const rows = (res.data.data || []).map((row, index) => ({ ...row, no: index + 1 }))
-      exportRowsToXLS(rows, projectType === 'ga' ? GA_EXPORT_COLUMNS : MKT_EXPORT_COLUMNS, `DaftarProject-${dayjs().format('YYYYMMDD-HHmm')}`, 'Daftar Project')
-    } catch (error) {
-      message.error(error.response?.data?.message || 'Gagal export daftar project')
-    } finally {
-      setExporting(false)
-    }
+  const handleExport = () => exportRowsToXLS({
+    fetchRows: async () => {
+      const res = await api.get('/api/project/export', {
+        params: {
+          search,
+          status: projectStatus,
+          project_type: projectType,
+          progress,
+          contact_name: projectType === 'mkt' ? contactName : '',
+        },
+      })
+      return (res.data.data || []).map((row, index) => ({ ...row, no: index + 1 }))
+    },
+    columns: projectType === 'ga' ? GA_EXPORT_COLUMNS : MKT_EXPORT_COLUMNS,
+    filename: `DaftarProject-${dayjs().format('YYYYMMDD-HHmm')}`,
+    sheetName: 'Daftar Project',
+    message,
+    setExporting,
+    auditModule: 'project',
+    auditDescription: `Export daftar project ${projectType.toUpperCase()}`,
+  })
+
+  const handleRemarkSaved = (projectNo, saved) => {
+    setData(prev => prev.map(row => (
+      row.no_project === projectNo
+        ? {
+          ...row,
+          remarks: saved.remarks || '',
+          remarks_updated_by: saved.updated_by || '',
+          remarks_updated_at: saved.updated_at || '',
+        }
+        : row
+    )))
   }
 
   const baseColumns = [
@@ -138,6 +213,8 @@ export default function DaftarProject() {
         </Button>
       ),
     },
+    { title: 'Nama Project', dataIndex: 'nama_project', width: 280, ellipsis: true },
+    { title: 'Nama Kontak', dataIndex: 'nama_kontak', width: 220, ellipsis: true },
     { title: 'Deskripsi Proyek', dataIndex: 'deskripsi', width: 420, ellipsis: true },
     { title: 'Tgl Mulai', dataIndex: 'tanggal_mulai', width: 130, render: renderDate },
     { title: 'Tgl Selesai', dataIndex: 'tanggal_selesai', width: 130, render: renderDate },
@@ -176,28 +253,34 @@ export default function DaftarProject() {
       ),
     },
   ]
-  const projectMetricColumns = projectType === 'ga' ? [
+  const projectMetricColumns = [
+    { title: 'Selisih', dataIndex: 'selisih', width: 150, align: 'right', render: value => <Text type={Number(value || 0) < 0 ? 'danger' : undefined}>{formatNumber(value)}</Text> },
+    { title: 'Value Profit RAB', dataIndex: 'value_profit_rab', width: 170, align: 'right', render: value => <Text strong>{formatNumber(value)}</Text> },
+    { title: '% Profit RAB', dataIndex: 'profit_rab', width: 150, align: 'right', render: value => <Text strong>{formatPercent(value)}</Text> },
     {
-      title: '%',
-      dataIndex: 'profit_realisasi',
-      width: 120,
+      title: 'Value Profit Realisasi',
+      dataIndex: 'value_profit_realisasi',
+      width: 190,
       align: 'right',
-      render: value => <Text strong type={Number(value || 0) < 0 ? 'danger' : undefined}>{formatPercent(value)}</Text>,
+      render: value => <Text strong type={Number(value || 0) < 0 ? 'danger' : undefined}>{formatNumber(value)}</Text>,
     },
-  ] : [
-    { title: 'Profit RAB %', dataIndex: 'profit_rab', width: 150, align: 'right', render: value => <Text strong>{formatPercent(value)}</Text> },
     {
-      title: 'Profit Realisasi %',
+      title: '% Profit Realisasi',
       dataIndex: 'profit_realisasi',
       width: 170,
       align: 'right',
       render: value => <Text strong type={Number(value || 0) < 0 ? 'danger' : undefined}>{formatPercent(value)}</Text>,
     },
+    {
+      title: 'Remarks',
+      dataIndex: 'remarks',
+      width: 280,
+      render: (_, record) => <EditableProjectRemarks record={record} onSaved={handleRemarkSaved} />,
+    },
   ]
   const columns = withTableSorters([
     ...baseColumns,
     ...projectMetricColumns,
-    { title: 'Selisih', dataIndex: 'selisih', width: 150, align: 'right', render: value => <Text type={Number(value || 0) < 0 ? 'danger' : undefined}>{formatNumber(value)}</Text> },
   ])
   const summary = getSummary(data)
   const summaryCards = [
@@ -263,6 +346,21 @@ export default function DaftarProject() {
               onChange={event => setSearch(event.target.value)}
               onSearch={() => fetchData(1, pagination.pageSize)}
             />
+            {projectType === 'mkt' && (
+              <Select
+                allowClear
+                showSearch
+                value={contactName || undefined}
+                placeholder="Filter nama kontak"
+                optionFilterProp="label"
+                style={{ width: 230 }}
+                options={contactOptions.map(value => ({ value, label: value }))}
+                onChange={value => {
+                  setContactName(value || '')
+                  setPagination(prev => ({ ...prev, current: 1 }))
+                }}
+              />
+            )}
             <div className="project-progress-filter">
               <div className="project-progress-grid">
                 <button
@@ -295,6 +393,7 @@ export default function DaftarProject() {
               value={projectType}
               onChange={value => {
                 setProjectType(value)
+                setContactName('')
                 setPagination(prev => ({ ...prev, current: 1 }))
               }}
               options={[
@@ -319,6 +418,7 @@ export default function DaftarProject() {
               onClick={() => {
                 setSearch('')
                 setProgress('')
+                setContactName('')
                 setProjectStatus('all')
                 setPagination(prev => ({ ...prev, current: 1 }))
               }}
@@ -337,18 +437,21 @@ export default function DaftarProject() {
             columns={columns}
             dataSource={data}
             size="small"
-            scroll={{ x: 1830, y: 'calc(100vh - 390px)' }}
+            scroll={{ x: 3260, y: 'calc(100vh - 390px)' }}
             summary={() => (
               <Table.Summary fixed>
                 <Table.Summary.Row>
-                  <Table.Summary.Cell index={0} colSpan={7}>
+                  <Table.Summary.Cell index={0} colSpan={9}>
                     <Text strong>Grand Total</Text>
                   </Table.Summary.Cell>
-                  <Table.Summary.Cell index={7} align="right"><Text strong>{formatNumber(summary.rab)}</Text></Table.Summary.Cell>
-                  <Table.Summary.Cell index={8} align="right"><Text strong>{formatNumber(summary.realisasi)}</Text></Table.Summary.Cell>
-                  <Table.Summary.Cell index={9} align="right"><Text strong>-</Text></Table.Summary.Cell>
-                  {projectType !== 'ga' && <Table.Summary.Cell index={10} align="right"><Text strong>-</Text></Table.Summary.Cell>}
-                  <Table.Summary.Cell index={projectType === 'ga' ? 10 : 11} align="right"><Text strong>{formatNumber(summary.selisih)}</Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={9} align="right"><Text strong>{formatNumber(summary.rab)}</Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={10} align="right"><Text strong>{formatNumber(summary.realisasi)}</Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={11} align="right"><Text strong>{formatNumber(summary.selisih)}</Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={12} align="right"><Text strong>{formatNumber(summary.value_profit_rab)}</Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={13} align="right"><Text strong>-</Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={14} align="right"><Text strong>{formatNumber(summary.value_profit_realisasi)}</Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={15} align="right"><Text strong>-</Text></Table.Summary.Cell>
+                  <Table.Summary.Cell index={16} align="right"><Text strong>-</Text></Table.Summary.Cell>
                 </Table.Summary.Row>
               </Table.Summary>
             )}

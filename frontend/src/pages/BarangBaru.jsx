@@ -139,7 +139,7 @@ export default function BarangBaru() {
         <Empty description="Belum ada barang baru" />
       ) : (
         <Table
-          rowKey="itemid"
+          rowKey="log_id"
           columns={withTableSorters(visibleColumns)}
           dataSource={filteredData}
           pagination={{

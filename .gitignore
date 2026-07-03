@@ -10,3 +10,8 @@ frontend/.env
 backend/.env
 
 *.db
+*.db-*
+*.db.*
+*.sqlite
+*.sqlite-*
+*.sqlite.*

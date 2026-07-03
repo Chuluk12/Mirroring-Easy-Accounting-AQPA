@@ -3,6 +3,7 @@ import { Badge, Dropdown, Layout, Menu, Tag, theme } from 'antd'
 import {
   BellOutlined,
   CalculatorOutlined,
+  ClockCircleOutlined,
   DashboardOutlined,
   DollarOutlined,
   FileTextOutlined,
@@ -38,6 +39,7 @@ const ROLE_COLOR = {
   purchasing: 'orange',
   marketing: 'green',
   akuntansi: 'gold',
+  akutansi_staff: 'gold',
   produksi: 'purple',
   ppc: 'geekblue',
 }
@@ -142,13 +144,15 @@ export default function MainLayout() {
   useVisiblePolling(checkBackendHealth, 10000, true, true)
 
   const buildMenuItems = () => {
-    const items = [
-      { key: '/', icon: <DashboardOutlined />, label: 'Dashboard' },
-    ]
+    const items = []
+    if (hasPermission('dashboard')) {
+      items.push({ key: '/', icon: <DashboardOutlined />, label: 'Dashboard' })
+    }
 
     const persediaanChildren = []
     if (hasPermission('stock')) {
       persediaanChildren.push({ key: '/stock', icon: <InboxOutlined />, label: 'Stok Barang' })
+      persediaanChildren.push({ key: '/riwayat-part-number', icon: <HistoryOutlined />, label: 'Riwayat Part Number' })
     }
     if (hasPermission('barang-baru')) {
       persediaanChildren.push({ key: '/barang-baru', icon: <PlusCircleOutlined />, label: 'Barang Baru' })
@@ -206,9 +210,14 @@ export default function MainLayout() {
     const penjualanChildren = []
     if (hasPermission('penjualan_so')) {
       penjualanChildren.push({ key: '/penjualan/penjualan', icon: <ShoppingOutlined />, label: 'Daftar Penjualan' })
+      penjualanChildren.push({ key: '/penjualan/kelengkapan-dokumen', icon: <SafetyOutlined />, label: 'Kelengkapan Dokumen' })
     }
     if (hasPermission('penjualan_do')) {
+      penjualanChildren.push({ key: '/penjualan/modul-pengiriman', icon: <SendOutlined />, label: 'Modul Pengiriman' })
       penjualanChildren.push({ key: '/penjualan/pengiriman', icon: <SendOutlined />, label: 'Daftar Pengiriman' })
+    }
+    if (hasPermission('waktu_pengiriman')) {
+      penjualanChildren.push({ key: '/penjualan/waktu-pengiriman', icon: <ClockCircleOutlined />, label: 'Waktu Pengiriman' })
     }
     if (hasPermission('invoice')) {
       penjualanChildren.push({ key: '/penjualan/invoice', icon: <FileTextOutlined />, label: 'Daftar Invoice' })
@@ -219,7 +228,7 @@ export default function MainLayout() {
     if (hasPermission('salesman')) {
       penjualanChildren.push({ key: '/penjualan/salesman', icon: <UserOutlined />, label: 'Salesman' })
     }
-    if ((hasPermission('penjualan') || hasPermission('penjualan_do')) && penjualanChildren.length > 0) {
+    if ((hasPermission('penjualan') || hasPermission('penjualan_do') || hasPermission('waktu_pengiriman')) && penjualanChildren.length > 0) {
       items.push({
         key: 'penjualan-group',
         icon: <ShoppingOutlined />,
@@ -283,7 +292,7 @@ export default function MainLayout() {
 
   const getDefaultOpenKeys = () => {
     const path = location.pathname
-    if (['/stock', '/barang-baru', '/riwayat'].includes(path)) return ['persediaan']
+    if (['/stock', '/barang-baru', '/riwayat', '/riwayat-part-number'].includes(path)) return ['persediaan']
     if (path.startsWith('/pembelian')) return ['pembelian-group']
     if (path.startsWith('/penjualan')) return ['penjualan-group']
     if (path.startsWith('/akuntansi')) return ['akuntansi-group']

@@ -7,6 +7,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard'))
 const Stock = lazy(() => import('./pages/Stock'))
 const BarangBaru = lazy(() => import('./pages/BarangBaru'))
 const Riwayat = lazy(() => import('./pages/Riwayat'))
+const RiwayatPartNumber = lazy(() => import('./pages/Persediaan/RiwayatPartNumber'))
 const Users = lazy(() => import('./pages/Users'))
 const AuditLog = lazy(() => import('./pages/AuditLog'))
 const Login = lazy(() => import('./pages/Login'))
@@ -19,10 +20,15 @@ const DaftarFPB = lazy(() => import('./pages/Pembelian/DaftarFPB'))
 
 // Sub-halaman Penjualan
 const DaftarPenjualan = lazy(() => import('./pages/Penjualan/DaftarPenjualan'))
+const ModulPengiriman = lazy(() => import('./pages/Penjualan/ModulPengiriman'))
 const DaftarPengiriman = lazy(() => import('./pages/Penjualan/DaftarPengiriman'))
+const WaktuPengiriman = lazy(() => import('./pages/Penjualan/WaktuPengiriman'))
+const KPITimeOnDelivery = lazy(() => import('./pages/Penjualan/KPITimeOnDelivery'))
+const KPIDeliveryBack = lazy(() => import('./pages/Penjualan/KPIDeliveryBack'))
 const DaftarInvoice = lazy(() => import('./pages/Penjualan/DaftarInvoice'))
 const Customer = lazy(() => import('./pages/Penjualan/Customer'))
 const Salesman = lazy(() => import('./pages/Penjualan/Salesman'))
+const KelengkapanDokumen = lazy(() => import('./pages/Penjualan/KelengkapanDokumen'))
 
 const HPP = lazy(() => import('./pages/Akuntansi/HPP'))
 const ProfitLoss = lazy(() => import('./pages/Akuntansi/ProfitLoss'))
@@ -41,6 +47,14 @@ function PrivateRoute({ children, module }) {
   return children
 }
 
+function HomeRoute() {
+  const { hasPermission } = useAuth()
+  if (hasPermission('dashboard')) return <Dashboard />
+  if (hasPermission('akuntansi')) return <Navigate to="/akuntansi/profit-loss" replace />
+  if (hasPermission('project')) return <Navigate to="/project/daftar" replace />
+  return null
+}
+
 function AppRoutes() {
   const { hasPermission } = useAuth()
   const pembelianIndex = hasPermission('pembelian') ? '/pembelian/pembelian' : '/pembelian/permintaan'
@@ -50,11 +64,12 @@ function AppRoutes() {
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<PrivateRoute><MainLayout /></PrivateRoute>}>
-          <Route index element={<Dashboard />} />
+          <Route index element={<HomeRoute />} />
           <Route path="stock"       element={<PrivateRoute module="stock"><Stock /></PrivateRoute>} />
           <Route path="siinas/*" element={<Navigate to="/" replace />} />
           <Route path="barang-baru" element={<PrivateRoute module="barang-baru"><BarangBaru /></PrivateRoute>} />
           <Route path="riwayat"     element={<PrivateRoute module="riwayat"><Riwayat /></PrivateRoute>} />
+          <Route path="riwayat-part-number" element={<PrivateRoute module="stock"><RiwayatPartNumber /></PrivateRoute>} />
           <Route path="users"       element={<PrivateRoute module="users"><Users /></PrivateRoute>} />
           <Route path="audit-log"   element={<PrivateRoute module="audit"><AuditLog /></PrivateRoute>} />
 
@@ -67,10 +82,15 @@ function AppRoutes() {
 
           {/* Sub-menu Penjualan */}
           <Route path="penjualan/penjualan"  element={<PrivateRoute module="penjualan_so"><DaftarPenjualan /></PrivateRoute>} />
+          <Route path="penjualan/modul-pengiriman" element={<PrivateRoute module="penjualan_do"><ModulPengiriman /></PrivateRoute>} />
           <Route path="penjualan/pengiriman" element={<PrivateRoute module="penjualan_do"><DaftarPengiriman /></PrivateRoute>} />
+          <Route path="penjualan/waktu-pengiriman" element={<PrivateRoute module="waktu_pengiriman"><WaktuPengiriman /></PrivateRoute>} />
+          <Route path="penjualan/kpi-time-on-delivery" element={<PrivateRoute module="kpi_time_on_delivery"><KPITimeOnDelivery /></PrivateRoute>} />
+          <Route path="penjualan/kpi-delivery-back" element={<PrivateRoute module="kpi_time_on_delivery"><KPIDeliveryBack /></PrivateRoute>} />
           <Route path="penjualan/invoice"    element={<PrivateRoute module="invoice"><DaftarInvoice /></PrivateRoute>} />
           <Route path="penjualan/customer"   element={<PrivateRoute module="customer"><Customer /></PrivateRoute>} />
           <Route path="penjualan/salesman"   element={<PrivateRoute module="salesman"><Salesman /></PrivateRoute>} />
+          <Route path="penjualan/kelengkapan-dokumen" element={<PrivateRoute module="penjualan_so"><KelengkapanDokumen /></PrivateRoute>} />
           <Route path="penjualan" element={<Navigate to="/penjualan/penjualan" replace />} />
 
           <Route path="manufaktur/*" element={<Navigate to="/" replace />} />

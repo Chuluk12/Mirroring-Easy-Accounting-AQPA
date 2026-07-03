@@ -20,6 +20,7 @@ const EXPORT_COLUMNS = [
   { key: 'nama_project', label: 'Nama Project' },
   { key: 'no_akun', label: 'No Akun' },
   { key: 'nama_akun', label: 'Nama Akun' },
+  { key: 'sumber', label: 'Sumber' },
   { key: 'tipe_transaksi', label: 'Tipe Transaksi' },
   { key: 'no_dokumen', label: 'No Dokumen' },
   { key: 'deskripsi', label: 'Deskripsi' },
@@ -67,20 +68,23 @@ export default function DetailProject() {
     fetchData(1, pagination.pageSize)
   }, [fetchData, pagination.pageSize])
 
-  const handleExport = async () => {
-    setExporting(true)
-    try {
+  const handleExport = () => exportRowsToXLS({
+    fetchRows: async () => {
       const params = { search, project_type: projectType }
+      if (linkedProjectNo) params.project_no = linkedProjectNo
       if (dateRange?.[0]) params.date_from = dateRange[0].format('YYYY-MM-DD')
       if (dateRange?.[1]) params.date_to = dateRange[1].format('YYYY-MM-DD')
       const res = await api.get('/api/project/detail/export', { params })
-      exportRowsToXLS(res.data.data || [], EXPORT_COLUMNS, `DetailProject-${projectType.toUpperCase()}-${dayjs().format('YYYYMMDD-HHmm')}`, 'Detail Project')
-    } catch (error) {
-      message.error(error.response?.data?.message || 'Gagal export detail project')
-    } finally {
-      setExporting(false)
-    }
-  }
+      return res.data.data || []
+    },
+    columns: EXPORT_COLUMNS,
+    filename: `DetailProject-${projectType.toUpperCase()}-${dayjs().format('YYYYMMDD-HHmm')}`,
+    sheetName: 'Detail Project',
+    message,
+    setExporting,
+    auditModule: 'project_detail',
+    auditDescription: `Export detail project ${projectType.toUpperCase()}`,
+  })
 
   const columns = withTableSorters([
     { title: 'Tanggal', dataIndex: 'tanggal', width: 120, fixed: 'left', render: value => value ? <Tag color="blue">{dayjs(value).format('DD/MM/YYYY')}</Tag> : '-' },
@@ -88,6 +92,7 @@ export default function DetailProject() {
     { title: 'Nama Project', dataIndex: 'nama_project', width: 260, ellipsis: true },
     { title: 'No Akun', dataIndex: 'no_akun', width: 130 },
     { title: 'Nama Akun', dataIndex: 'nama_akun', width: 240, ellipsis: true },
+    { title: 'Sumber', dataIndex: 'sumber', width: 140, render: value => value ? <Tag color={value === 'Manual Dashboard' ? 'magenta' : value === 'Profit & Loss' ? 'blue' : value === 'HPP' ? 'volcano' : 'default'}>{value}</Tag> : '-' },
     { title: 'Tipe', dataIndex: 'tipe_transaksi', width: 100 },
     { title: 'No Dokumen', dataIndex: 'no_dokumen', width: 150, render: value => <Text code>{value || '-'}</Text> },
     { title: 'Deskripsi', dataIndex: 'deskripsi', width: 420, ellipsis: { showTitle: false }, render: value => <Tooltip title={value}><span>{value || '-'}</span></Tooltip> },
