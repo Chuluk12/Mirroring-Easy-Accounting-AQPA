@@ -231,8 +231,12 @@ async function exportToExcel({ endpoint, params, filename, columns, token, setEx
       const res = await api.get(`${endpoint}`, {
         params,
         headers: { Authorization: `Bearer ${token}` },
+        timeout: 180000,
       })
-      return (res.data.data || []).map((row, index) => ({ no: index + 1, ...row }))
+      if (res.data?.error) {
+        throw new Error(res.data.error)
+      }
+      return res.data.data || []
     },
     columns,
     filename,
@@ -245,7 +249,6 @@ async function exportToExcel({ endpoint, params, filename, columns, token, setEx
 
 // â”€â”€â”€ Kolom export SO â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const SO_EXPORT_COLS = [
-  { key: 'no',               label: 'No',             type: 'number' },
   { key: 'no_so',            label: 'No SO' },
   { key: 'tgl_so',           label: 'Tgl SO',         type: 'date' },
   { key: 'tgl_estimasi',     label: 'Est. Kirim',      type: 'date' },
@@ -255,6 +258,7 @@ const SO_EXPORT_COLS = [
   { key: 'nama_salesman',    label: 'Salesman' },
   { key: 'no_barang',        label: 'No Barang' },
   { key: 'deskripsi_barang', label: 'Deskripsi Barang' },
+  { key: 'category_produk',  label: 'Category Produk' },
   { key: 'qty',              label: 'Qty Order',       type: 'number' },
   { key: 'qty_shipped',      label: 'Qty Shipped',     type: 'number' },
   { key: 'sisa_kirim',       label: 'Sisa Kirim',      type: 'number' },
@@ -394,8 +398,7 @@ function TabSO() {
       params,
       filename: 'SalesOrder',
       columns: [
-        SO_EXPORT_COLS[0],
-        ...filterExportColumnsByPermission('penjualan_so', SO_EXPORT_COLS.slice(1), user),
+        ...filterExportColumnsByPermission('penjualan_so', SO_EXPORT_COLS, user),
       ],
       token,
       setExporting,
@@ -426,6 +429,8 @@ function TabSO() {
           </Tooltip>
         )
       } },
+    { title: 'No Pelanggan (CSR)', dataIndex: 'no_pelanggan', key: 'no_pelanggan', width: 145,
+      render: v => v ? <Text code style={{ fontSize: 12 }}>{v}</Text> : '-' },
     { title: 'Nama Pelanggan', dataIndex: 'nama_pelanggan', key: 'nama_pelanggan', width: 215, ellipsis: { showTitle: false },
       render: v => <Tooltip title={v}><span>{v || '-'}</span></Tooltip> },
     { title: 'No. PO Customer', dataIndex: 'no_po_customer', key: 'no_po_customer', width: 150,
@@ -436,6 +441,8 @@ function TabSO() {
       render: v => <Text code style={{ fontSize: 12 }}>{v || '-'}</Text> },
     { title: 'Deskripsi Barang', dataIndex: 'deskripsi_barang', key: 'deskripsi_barang', width: 260, ellipsis: { showTitle: false },
       render: v => <Tooltip title={v}><span>{v || '-'}</span></Tooltip> },
+    { title: 'Category Produk', dataIndex: 'category_produk', key: 'category_produk', width: 150,
+      render: v => v ? <Tag color="cyan">{v}</Tag> : <Text type="secondary">-</Text> },
     { title: 'Qty Order', dataIndex: 'qty', key: 'qty', width: 95, align: 'right',
       render: v => formatQty(v) },
     { title: 'Qty Shipped', dataIndex: 'qty_shipped', key: 'qty_shipped', width: 100, align: 'right',
@@ -493,6 +500,7 @@ function TabSO() {
   const detailColumns = [
     { title: 'No Barang', dataIndex: 'no_barang', width: 130, render: v => <Text code>{v || '-'}</Text> },
     { title: 'Deskripsi', dataIndex: 'deskripsi_barang', width: 220, ellipsis: true },
+    { title: 'Category Produk', dataIndex: 'category_produk', width: 145, render: v => v ? <Tag color="cyan">{v}</Tag> : '-' },
     { title: 'Qty', dataIndex: 'qty', width: 80, align: 'right', render: v => formatQty(v) },
     { title: 'Terkirim', dataIndex: 'qty_shipped', width: 85, align: 'right', render: v => formatQty(v) },
     { title: 'Sisa', dataIndex: 'sisa_kirim', width: 80, align: 'right', render: v => formatQty(v) },
@@ -531,7 +539,7 @@ function TabSO() {
             <Button icon={<ReloadOutlined />} onClick={handleReset}>Reset</Button>
             <Button type="primary" icon={exporting ? <LoadingOutlined /> : <FileExcelOutlined />}
               onClick={handleExport} disabled={exporting}
-              style={{ background: '#217346', borderColor: '#217346' }}>
+              style={{ background: '#087ff5', borderColor: '#087ff5' }}>
               {exporting ? 'Mengekspor...' : 'Export XLS'}
             </Button>
           </Space>
@@ -543,7 +551,7 @@ function TabSO() {
           columns={withTableSorters(visibleColumns)} dataSource={data} loading={loading}
           size="small"
           sticky={{ offsetHeader: 0 }}
-          scroll={{ x: 2520, y: 'calc(100vh - 340px)' }}
+          scroll={{ x: 2815, y: 'calc(100vh - 340px)' }}
           onRow={rec => ({
             onClick: () => setSelected(rec),
             style: { cursor: 'pointer' },
@@ -987,7 +995,7 @@ function TabInvoice() {
             <Button icon={<ReloadOutlined />} onClick={handleReset}>Reset</Button>
             <Button type="primary" icon={exporting ? <LoadingOutlined /> : <FileExcelOutlined />}
               onClick={handleExport} disabled={exporting}
-              style={{ background: '#217346', borderColor: '#217346' }}>
+              style={{ background: '#087ff5', borderColor: '#087ff5' }}>
               {exporting ? 'Mengekspor...' : 'Export XLS'}
             </Button>
           </Space>

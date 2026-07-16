@@ -6,6 +6,7 @@ const AuthContext = createContext(null)
 const PERMISSION_PARENTS = {
   salesman: 'penjualan',
   customer: 'penjualan',
+  customer_registration_documents: 'penjualan',
   waktu_pengiriman: 'penjualan_do',
 }
 

@@ -312,7 +312,7 @@ export default function DaftarFPB() {
             <Button type="primary"
               icon={exporting ? <LoadingOutlined /> : <FileExcelOutlined />}
               onClick={handleExport} disabled={exporting}
-              style={{ background: '#217346', borderColor: '#217346' }}>
+              style={{ background: '#087ff5', borderColor: '#087ff5' }}>
               {exporting ? 'Mengekspor...' : 'Export XLS'}
             </Button>
           </Space>

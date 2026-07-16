@@ -29,6 +29,8 @@ const DaftarInvoice = lazy(() => import('./pages/Penjualan/DaftarInvoice'))
 const Customer = lazy(() => import('./pages/Penjualan/Customer'))
 const Salesman = lazy(() => import('./pages/Penjualan/Salesman'))
 const KelengkapanDokumen = lazy(() => import('./pages/Penjualan/KelengkapanDokumen'))
+const KelengkapanRegistrasiCustomer = lazy(() => import('./pages/Penjualan/KelengkapanRegistrasiCustomer'))
+const PengajuanFee = lazy(() => import('./pages/Penjualan/PengajuanFee'))
 
 const HPP = lazy(() => import('./pages/Akuntansi/HPP'))
 const ProfitLoss = lazy(() => import('./pages/Akuntansi/ProfitLoss'))
@@ -48,15 +50,18 @@ function PrivateRoute({ children, module }) {
 }
 
 function HomeRoute() {
-  const { hasPermission } = useAuth()
+  const { hasPermission, user } = useAuth()
+  if (user?.role === 'marketing_fee' && hasPermission('fee_submission')) return <Navigate to="/pengajuan-fee/pengajuan-cf" replace />
   if (hasPermission('dashboard')) return <Dashboard />
   if (hasPermission('akuntansi')) return <Navigate to="/akuntansi/profit-loss" replace />
   if (hasPermission('project')) return <Navigate to="/project/daftar" replace />
+  if (hasPermission('fee_submission')) return <Navigate to="/pengajuan-fee/pengajuan-cf" replace />
   return null
 }
 
 function AppRoutes() {
-  const { hasPermission } = useAuth()
+  const { hasPermission, user } = useAuth()
+  const userRole = user?.role || ''
   const pembelianIndex = hasPermission('pembelian') ? '/pembelian/pembelian' : '/pembelian/permintaan'
 
   return (
@@ -72,6 +77,11 @@ function AppRoutes() {
           <Route path="riwayat-part-number" element={<PrivateRoute module="stock"><RiwayatPartNumber /></PrivateRoute>} />
           <Route path="users"       element={<PrivateRoute module="users"><Users /></PrivateRoute>} />
           <Route path="audit-log"   element={<PrivateRoute module="audit"><AuditLog /></PrivateRoute>} />
+          <Route path="pengajuan-fee/pengajuan-cf" element={<PrivateRoute module="fee_submission"><PengajuanFee view="request" requestFeeType="CF" /></PrivateRoute>} />
+          <Route path="pengajuan-fee/pengajuan-mf" element={<PrivateRoute module="fee_submission"><PengajuanFee view="request" requestFeeType="MF" /></PrivateRoute>} />
+          <Route path="pengajuan-fee/pengajuan" element={<Navigate to="/pengajuan-fee/pengajuan-cf" replace />} />
+          <Route path="pengajuan-fee/persetujuan" element={<PrivateRoute module="fee_submission"><PengajuanFee view="approval" /></PrivateRoute>} />
+          <Route path="pengajuan-fee" element={<PrivateRoute module="fee_submission"><Navigate to={userRole === 'marketing_fee' ? '/pengajuan-fee/pengajuan-cf' : '/pengajuan-fee/persetujuan'} replace /></PrivateRoute>} />
 
           {/* Sub-menu Pembelian */}
           <Route path="pembelian/permintaan" element={<PrivateRoute module="permintaan"><DaftarPermintaan /></PrivateRoute>} />
@@ -89,8 +99,10 @@ function AppRoutes() {
           <Route path="penjualan/kpi-delivery-back" element={<PrivateRoute module="kpi_time_on_delivery"><KPIDeliveryBack /></PrivateRoute>} />
           <Route path="penjualan/invoice"    element={<PrivateRoute module="invoice"><DaftarInvoice /></PrivateRoute>} />
           <Route path="penjualan/customer"   element={<PrivateRoute module="customer"><Customer /></PrivateRoute>} />
+          <Route path="penjualan/kelengkapan-registrasi-customer" element={<PrivateRoute module="customer_registration_documents"><KelengkapanRegistrasiCustomer /></PrivateRoute>} />
           <Route path="penjualan/salesman"   element={<PrivateRoute module="salesman"><Salesman /></PrivateRoute>} />
           <Route path="penjualan/kelengkapan-dokumen" element={<PrivateRoute module="penjualan_so"><KelengkapanDokumen /></PrivateRoute>} />
+          <Route path="penjualan/pengajuan-fee" element={<Navigate to="/pengajuan-fee" replace />} />
           <Route path="penjualan" element={<Navigate to="/penjualan/penjualan" replace />} />
 
           <Route path="manufaktur/*" element={<Navigate to="/" replace />} />
@@ -123,22 +135,22 @@ function App() {
     <ConfigProvider
       theme={{
         token: {
-          colorPrimary: '#d41452',
-          colorSuccess: '#00a92f',
-          colorInfo: '#11b7d8',
+          colorPrimary: '#087ff5',
+          colorSuccess: '#18a058',
+          colorInfo: '#0aa3c3',
           colorWarning: '#ff7a00',
           colorError: '#f2293a',
-          colorBgLayout: '#f4f7fb',
-          colorText: '#20243a',
-          colorTextSecondary: '#697087',
+          colorBgLayout: '#f3f7fc',
+          colorText: '#20242d',
+          colorTextSecondary: '#687386',
           borderRadius: 8,
           wireframe: false,
         },
         components: {
           Layout: {
-            bodyBg: '#f4f7fb',
+            bodyBg: '#f3f7fc',
             headerBg: 'rgba(255,255,255,0.88)',
-            siderBg: '#14172b',
+            siderBg: '#101722',
           },
           Card: {
             headerBg: 'transparent',
@@ -151,12 +163,12 @@ function App() {
           Table: {
             headerBg: '#f7f9fd',
             headerColor: '#343a56',
-            rowHoverBg: '#fff5f8',
+            rowHoverBg: '#eef7ff',
           },
           Menu: {
-            darkItemBg: '#14172b',
-            darkSubMenuItemBg: '#101326',
-            darkItemSelectedBg: '#d41452',
+            darkItemBg: '#101722',
+            darkSubMenuItemBg: '#0b111a',
+            darkItemSelectedBg: '#087ff5',
             darkItemSelectedColor: '#ffffff',
             darkItemHoverBg: 'rgba(255,255,255,0.08)',
           },

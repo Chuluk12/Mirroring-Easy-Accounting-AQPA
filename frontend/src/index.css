@@ -10,11 +10,11 @@ html, body, #root {
 }
 
 body {
-  color: #20243a;
+  color: #20242d;
   background:
-    radial-gradient(circle at 18% 8%, rgba(224, 24, 168, 0.11), transparent 28%),
-    radial-gradient(circle at 78% 0%, rgba(17, 183, 216, 0.14), transparent 30%),
-    linear-gradient(135deg, #f8f4fb 0%, #f4f8ff 44%, #f6fbf7 100%);
+    radial-gradient(circle at 16% 6%, rgba(8, 127, 245, 0.13), transparent 28%),
+    radial-gradient(circle at 78% 0%, rgba(31, 164, 255, 0.12), transparent 30%),
+    linear-gradient(135deg, #f4f8fd 0%, #ffffff 44%, #eef6ff 100%);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   overflow-x: hidden;
 }
@@ -28,9 +28,9 @@ select {
 
 .easy-sider {
   background:
-    radial-gradient(circle at 12% 0%, rgba(224, 24, 168, 0.35), transparent 26%),
-    radial-gradient(circle at 92% 14%, rgba(0, 169, 47, 0.22), transparent 25%),
-    linear-gradient(180deg, #15172f 0%, #111326 100%) !important;
+    radial-gradient(circle at 10% 0%, rgba(8, 127, 245, 0.34), transparent 25%),
+    radial-gradient(circle at 92% 12%, rgba(92, 191, 255, 0.16), transparent 26%),
+    linear-gradient(180deg, #101722 0%, #07111d 100%) !important;
   box-shadow: 16px 0 40px rgba(20, 23, 43, 0.18);
   position: sticky !important;
   top: 0;
@@ -68,17 +68,17 @@ select {
   inset: 12px 12px auto 12px;
   height: 54px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(110, 187, 255, 0.22);
 }
 
 .easy-brand-logo {
-  width: 42px;
+  width: 44px;
   height: 42px;
   object-fit: contain;
   flex-shrink: 0;
   position: relative;
-  filter: drop-shadow(0 8px 18px rgba(212, 20, 82, 0.38));
+  filter: drop-shadow(0 8px 18px rgba(8, 127, 245, 0.32));
 }
 
 .easy-brand-copy {
@@ -87,7 +87,7 @@ select {
 }
 
 .easy-brand-title {
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1.2;
   white-space: nowrap;
 }
@@ -105,20 +105,12 @@ select {
   height: calc(100vh - 78px - 48px);
   overflow-y: auto;
   overflow-x: hidden;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
 .easy-menu::-webkit-scrollbar {
-  width: 6px;
-}
-
-.easy-menu::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.18);
-  border-radius: 999px;
-}
-
-.easy-menu::-webkit-scrollbar-track {
-  background: transparent;
+  display: none;
 }
 
 .easy-menu .ant-menu-item,
@@ -131,8 +123,8 @@ select {
 }
 
 .easy-menu .ant-menu-item-selected {
-  background: linear-gradient(135deg, #d41452 0%, #e018a8 46%, #7c3cff 100%) !important;
-  box-shadow: 0 10px 22px rgba(212, 20, 82, 0.28);
+  background: linear-gradient(135deg, #006fe8 0%, #087ff5 54%, #35a9ff 100%) !important;
+  box-shadow: 0 10px 22px rgba(8, 127, 245, 0.26);
 }
 
 .easy-menu .ant-menu-sub {
@@ -178,17 +170,17 @@ select {
   width: 38px;
   height: 38px;
   border-radius: 8px;
-  background: linear-gradient(135deg, #d41452 0%, #e018a8 28%, #7c3cff 52%, #11b7d8 76%, #00a92f 100%);
+  background: linear-gradient(135deg, #005fc7 0%, #087ff5 52%, #47b7ff 100%);
   display: grid;
   place-items: center;
   color: #fff;
-  box-shadow: 0 10px 24px rgba(212, 20, 82, 0.22);
+  box-shadow: 0 10px 24px rgba(8, 127, 245, 0.22);
 }
 
 .easy-header-name {
   font-size: 16px;
   font-weight: 700;
-  color: #20243a;
+  color: #20242d;
   line-height: 1.2;
 }
 
@@ -205,10 +197,10 @@ select {
   border-radius: 8px;
   display: grid;
   place-items: center;
-  background: #fff5f8;
-  color: #d41452;
+  background: #eef7ff;
+  color: #087ff5;
   cursor: pointer;
-  box-shadow: inset 0 0 0 1px rgba(212, 20, 82, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(8, 127, 245, 0.13);
 }
 
 .easy-fullscreen-button {
@@ -225,7 +217,7 @@ select {
 
 .easy-user-chip {
   cursor: pointer;
-  color: #20243a;
+  color: #20242d;
   gap: 7px;
   min-width: 0;
   max-width: 260px;
@@ -245,7 +237,7 @@ select {
 }
 
 .easy-user-icon {
-  color: #7c3cff;
+  color: #087ff5;
   flex: 0 0 auto;
   font-size: 14px;
 }
@@ -284,7 +276,7 @@ select {
   width: 240px;
   height: 240px;
   pointer-events: none;
-  background: linear-gradient(135deg, rgba(212, 20, 82, 0.08), rgba(17, 183, 216, 0.08));
+  background: linear-gradient(135deg, rgba(8, 127, 245, 0.08), rgba(28, 160, 255, 0.08));
   clip-path: polygon(50% 0, 94% 25%, 94% 75%, 50% 100%, 6% 75%, 6% 25%);
 }
 
@@ -333,7 +325,7 @@ select {
 }
 
 .ant-card-head-title {
-  color: #20243a;
+  color: #20242d;
   font-weight: 700;
 }
 
@@ -343,12 +335,12 @@ select {
 }
 
 .ant-statistic-content {
-  color: #20243a;
+  color: #20242d;
   font-weight: 750;
 }
 
 .ant-card:has(.ant-statistic) {
-  --easy-stat-accent: #d41452;
+  --easy-stat-accent: #087ff5;
   position: relative;
   background:
     radial-gradient(circle at 88% 20%, color-mix(in srgb, var(--easy-stat-accent) 20%, transparent) 0%, transparent 30%),
@@ -356,15 +348,15 @@ select {
 }
 
 .ant-row > .ant-col:nth-child(4n + 1) .ant-card:has(.ant-statistic) {
-  --easy-stat-accent: #11b7d8;
+  --easy-stat-accent: #087ff5;
 }
 
 .ant-row > .ant-col:nth-child(4n + 2) .ant-card:has(.ant-statistic) {
-  --easy-stat-accent: #d41452;
+  --easy-stat-accent: #2f343b;
 }
 
 .ant-row > .ant-col:nth-child(4n + 3) .ant-card:has(.ant-statistic) {
-  --easy-stat-accent: #00a92f;
+  --easy-stat-accent: #18a058;
 }
 
 .ant-row > .ant-col:nth-child(4n + 4) .ant-card:has(.ant-statistic) {
@@ -390,9 +382,9 @@ select {
 }
 
 .ant-btn-primary {
-  background: linear-gradient(135deg, #d41452 0%, #e018a8 52%, #7c3cff 100%) !important;
+  background: linear-gradient(135deg, #006fe8 0%, #087ff5 58%, #35a9ff 100%) !important;
   border-color: transparent !important;
-  box-shadow: 0 10px 20px rgba(212, 20, 82, 0.18);
+  box-shadow: 0 10px 20px rgba(8, 127, 245, 0.2);
 }
 
 .ant-btn-primary:hover {
@@ -419,7 +411,7 @@ select {
 }
 
 .ant-table-tbody > tr:hover > td {
-  background: #fff5f8 !important;
+  background: #eef7ff !important;
 }
 
 .ant-table-wrapper {
@@ -445,7 +437,7 @@ select {
 
 .ant-table-tbody > tr:hover > .ant-table-cell-fix-left,
 .ant-table-tbody > tr:hover > .ant-table-cell-fix-right {
-  background: #fff5f8 !important;
+  background: #eef7ff !important;
 }
 
 .ant-table-cell-fix-left-last::after,
@@ -576,8 +568,8 @@ select {
 .ant-input-affix-wrapper-focused,
 .ant-picker-focused,
 .ant-select-focused .ant-select-selector {
-  border-color: #d41452 !important;
-  box-shadow: 0 0 0 3px rgba(212, 20, 82, 0.09) !important;
+  border-color: #087ff5 !important;
+  box-shadow: 0 0 0 3px rgba(8, 127, 245, 0.11) !important;
 }
 
 .easy-dashboard-page .ant-card {
@@ -586,7 +578,7 @@ select {
 
 .easy-dashboard-page h2,
 .easy-dashboard-page h4 {
-  color: #20243a !important;
+  color: #20242d !important;
 }
 
 .easy-login {
@@ -596,10 +588,10 @@ select {
   position: relative;
   overflow: hidden;
   background:
-    radial-gradient(circle at 18% 18%, rgba(224, 24, 168, 0.28), transparent 28%),
-    radial-gradient(circle at 78% 20%, rgba(17, 183, 216, 0.25), transparent 30%),
-    radial-gradient(circle at 70% 82%, rgba(0, 169, 47, 0.20), transparent 28%),
-    linear-gradient(135deg, #15172f 0%, #21183d 52%, #101326 100%);
+    radial-gradient(circle at 14% 18%, rgba(8, 127, 245, 0.30), transparent 29%),
+    radial-gradient(circle at 82% 16%, rgba(83, 184, 255, 0.20), transparent 30%),
+    radial-gradient(circle at 72% 84%, rgba(255, 255, 255, 0.10), transparent 28%),
+    linear-gradient(135deg, #060b12 0%, #101722 50%, #07111d 100%);
   padding: 24px;
 }
 
@@ -614,38 +606,231 @@ select {
 
 .easy-login-pattern {
   position: absolute;
-  width: 560px;
-  height: 560px;
-  right: -120px;
-  top: -140px;
-  background: linear-gradient(135deg, rgba(212, 20, 82, 0.32), rgba(17, 183, 216, 0.22));
+  width: 620px;
+  height: 620px;
+  right: -140px;
+  top: -160px;
+  background: linear-gradient(135deg, rgba(8, 127, 245, 0.28), rgba(255, 255, 255, 0.10));
   clip-path: polygon(50% 0, 94% 25%, 94% 75%, 50% 100%, 6% 75%, 6% 25%);
 }
 
+.easy-login-shell {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(360px, 430px);
+  width: min(1040px, 100%);
+  min-height: 570px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: 0 34px 90px rgba(0, 0, 0, 0.36);
+  backdrop-filter: blur(18px);
+}
+
+.easy-login-showcase {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 32px;
+  padding: 38px;
+  color: #fff;
+  background:
+    linear-gradient(135deg, rgba(8, 127, 245, 0.22), rgba(8, 127, 245, 0.04)),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0));
+}
+
+.easy-login-showcase::after {
+  content: "";
+  position: absolute;
+  right: -84px;
+  bottom: -92px;
+  width: 340px;
+  height: 340px;
+  border: 1px solid rgba(92, 191, 255, 0.26);
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 24px rgba(8, 127, 245, 0.06);
+  pointer-events: none;
+}
+
+.easy-login-showcase-top,
+.easy-login-showcase-copy,
+.easy-login-metrics {
+  position: relative;
+  z-index: 1;
+}
+
+.easy-login-wordmark {
+  width: min(390px, 100%);
+  height: auto;
+  padding: 14px 18px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.20);
+}
+
+.easy-login-kicker {
+  display: inline-block;
+  margin-bottom: 14px;
+  color: #9dd5ff;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+}
+
+.easy-login-showcase h1 {
+  max-width: 540px;
+  margin: 0;
+  color: #fff;
+  font-size: 44px;
+  line-height: 1.04;
+}
+
+.easy-login-showcase p {
+  max-width: 470px;
+  margin: 16px 0 0;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.easy-login-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.easy-login-metrics span {
+  padding: 9px 12px;
+  border: 1px solid rgba(157, 213, 255, 0.24);
+  border-radius: 8px;
+  color: #d9efff;
+  font-size: 12px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .easy-login-card {
-  width: min(400px, 100%);
+  width: 100%;
   border-radius: 8px !important;
   position: relative;
   z-index: 1;
-  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.34) !important;
+  align-self: stretch;
+  border: 0 !important;
+  background: rgba(255, 255, 255, 0.98) !important;
+  box-shadow: none !important;
+}
+
+.easy-login-card .ant-card-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 100%;
+  padding: 44px 40px !important;
+}
+
+.easy-login-card-head {
+  margin-bottom: 30px;
+  text-align: left;
 }
 
 .easy-login-logo-wrap {
-  width: 94px;
-  height: 94px;
-  margin: 0 auto;
+  width: 210px;
+  height: 64px;
+  margin: 0 0 22px;
   display: grid;
   place-items: center;
   border-radius: 8px;
-  background: linear-gradient(135deg, rgba(212, 20, 82, 0.10), rgba(17, 183, 216, 0.10));
-  box-shadow: inset 0 0 0 1px rgba(212, 20, 82, 0.08);
+  background: #fff;
+  box-shadow: inset 0 0 0 1px rgba(8, 127, 245, 0.10), 0 10px 24px rgba(8, 127, 245, 0.09);
 }
 
 .easy-login-logo {
-  width: 82px;
-  height: 82px;
+  width: 178px;
+  height: auto;
   object-fit: contain;
-  filter: drop-shadow(0 10px 22px rgba(212, 20, 82, 0.24));
+}
+
+.easy-login-card-head h2 {
+  margin: 0 0 6px;
+  color: #20242d;
+  font-size: 26px;
+  line-height: 1.2;
+}
+
+.easy-login-card-head p {
+  margin: 0;
+  color: #687386;
+}
+
+.easy-login-card .ant-form-item {
+  margin-bottom: 18px;
+}
+
+.easy-login-card .ant-input-affix-wrapper {
+  min-height: 46px;
+}
+
+.easy-login-footer {
+  margin: 4px 0 0;
+  color: #98a3b3;
+  font-size: 12px;
+  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .easy-login {
+    align-items: start;
+    padding: 18px;
+  }
+
+  .easy-login::before {
+    inset: 10px;
+  }
+
+  .easy-login-shell {
+    grid-template-columns: 1fr;
+    width: min(460px, 100%);
+    min-height: 0;
+  }
+
+  .easy-login-showcase {
+    gap: 18px;
+    padding: 26px 24px;
+  }
+
+  .easy-login-showcase h1 {
+    font-size: 30px;
+  }
+
+  .easy-login-showcase p,
+  .easy-login-metrics {
+    display: none;
+  }
+
+  .easy-login-wordmark {
+    width: min(310px, 100%);
+  }
+
+  .easy-login-card .ant-card-body {
+    padding: 30px 24px !important;
+  }
+
+  .easy-login-card-head {
+    margin-bottom: 24px;
+  }
+
+  .easy-login-logo-wrap {
+    width: 190px;
+    height: 58px;
+  }
+
+  .easy-login-logo {
+    width: 160px;
+  }
 }
 
 .monitoring-spk-page {
@@ -713,7 +898,7 @@ select {
 }
 
 .monitoring-spk-table .ant-table-tbody > tr:hover > td {
-  background: #fff5f8 !important;
+  background: #eef7ff !important;
 }
 
 .monitoring-spk-table .ant-table-cell-fix-left,
@@ -779,7 +964,7 @@ select {
     top: 12px;
     left: 12px;
     border-radius: 8px;
-    background: #15172f;
+    background: #101722;
     box-shadow: 0 10px 24px rgba(20, 23, 43, 0.24);
   }
 
@@ -1138,6 +1323,28 @@ select {
   padding-inline: 0;
 }
 
+.dashboard-export-button.ant-btn-primary,
+.dashboard-export-button.ant-btn-primary:hover,
+.dashboard-export-button.ant-btn-primary:focus {
+  color: #fff !important;
+}
+
+.dashboard-export-button.ant-btn-primary .anticon {
+  color: #fff !important;
+}
+
+.ant-btn:has(.anticon-file-excel):not(:disabled):not(.ant-btn-disabled),
+.ant-btn:has(.anticon-file-excel):not(:disabled):not(.ant-btn-disabled):hover,
+.ant-btn:has(.anticon-file-excel):not(:disabled):not(.ant-btn-disabled):focus {
+  background: #087ff5 !important;
+  border-color: #087ff5 !important;
+  color: #fff !important;
+}
+
+.ant-btn:has(.anticon-file-excel):not(:disabled):not(.ant-btn-disabled) .anticon {
+  color: #fff !important;
+}
+
 .waktu-pengiriman-table .ant-table-cell {
   overflow: hidden;
 }
@@ -1439,7 +1646,8 @@ select {
   .sales-document-print-info-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 3mm 5mm;
+    column-gap: 18mm;
+    row-gap: 2mm;
     margin-top: 3mm;
   }
 
@@ -1447,11 +1655,11 @@ select {
     display: grid;
     grid-template-columns: 25mm 1fr;
     align-items: center;
-    min-height: 11mm;
-    padding: 0 4mm;
-    background: #f3f6fa !important;
-    border: 0.3mm solid #b8c8dc;
-    border-radius: 1.2mm;
+    min-height: 5mm;
+    padding: 0;
+    background: transparent !important;
+    border: 0;
+    border-radius: 0;
   }
 
   .sales-document-print-info-grid span {
@@ -1476,6 +1684,7 @@ select {
   }
 
   .sales-document-print-checklist-heading > span {
+    margin-left: auto;
     color: #61738a !important;
     font-size: 7pt;
   }
@@ -1807,7 +2016,7 @@ select {
     gap: 8mm;
     margin-bottom: 3mm;
     padding-bottom: 2mm;
-    border-bottom: 0.5mm solid #d41452;
+    border-bottom: 0.5mm solid #087ff5;
   }
 
   .sales-daily-print-header h1 {

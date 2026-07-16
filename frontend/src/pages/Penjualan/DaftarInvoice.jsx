@@ -295,7 +295,7 @@ export default function DaftarInvoice() {
               type="primary"
               icon={<FileExcelOutlined />}
               onClick={handleExport}
-              style={{ background: '#217346', borderColor: '#217346' }}
+              style={{ background: '#087ff5', borderColor: '#087ff5' }}
             >
               Export XLS
             </Button>

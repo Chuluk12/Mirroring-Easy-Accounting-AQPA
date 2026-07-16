@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  Button, Card, Checkbox, Col, DatePicker, Drawer, Empty, Input, Popconfirm,
+  Button, Card, Checkbox, Col, Drawer, Empty, Input, Popconfirm,
   Progress, Row, Select, Space, Statistic, Table, Tag, Tooltip, Typography, message,
 } from 'antd'
 import {
@@ -12,15 +12,17 @@ import dayjs from 'dayjs'
 import api, { getApiErrorMessage } from '../../api/client'
 import { withTableSorters } from '../../utils/tableSorters'
 
-const { RangePicker } = DatePicker
 const { Search } = Input
 const { Text } = Typography
 
 const DEFAULT_DOCUMENTS = [
-  { key: 'do_origin', label: 'DO Origin', department: 'LOG' },
-  { key: 'po', label: 'PO', department: 'MKT' },
-  { key: 'faktur_pajak', label: 'Faktur Pajak', department: 'ACC' },
-  { key: 'invoice', label: 'Invoice', department: 'ACC' },
+  { key: 'npwp', label: 'NPWP', department: 'MKT' },
+  { key: 'alamat_ho', label: 'Alamat HO', department: 'MKT' },
+  { key: 'alamat_kirim', label: 'Alamat Kirim', department: 'MKT' },
+  { key: 'alamat_pajak', label: 'Alamat Pajak', department: 'MKT' },
+  { key: 'pic_po', label: 'PIC PO', department: 'MKT' },
+  { key: 'pic_invoicing', label: 'PIC Invoicing', department: 'MKT' },
+  { key: 'top', label: 'TOP', department: 'MKT' },
 ]
 const DEFAULT_DOCUMENT_KEYS = new Set(DEFAULT_DOCUMENTS.map(document => document.key))
 
@@ -52,12 +54,11 @@ function DocumentHeader({ document }) {
     </Space>
   )
 }
-
 function PrintCheckbox({ checked }) {
   return <span className={`sales-document-print-checkbox${checked ? ' is-checked' : ''}`} aria-hidden="true" />
 }
 
-function SalesDocumentPrintSheet({ record, documentTypes }) {
+function CustomerRegistrationPrintSheet({ record, documentTypes }) {
   if (!record) return null
 
   const documents = [
@@ -68,36 +69,36 @@ function SalesDocumentPrintSheet({ record, documentTypes }) {
   return createPortal(
     <section className="sales-document-print-sheet">
       <header className="sales-document-print-title">
-        <h1>CHECKLIST DOKUMEN PENGIRIMAN &amp; INVOICING</h1>
-        <span>Form Kontrol Dokumen SO</span>
+        <h1>CHECKLIST DOKUMEN REGISTRASI CUSTOMER</h1>
+        <span>Form Kontrol Registrasi Customer</span>
       </header>
 
       <div className="sales-document-print-info">
-        <h2>Informasi Sales Order</h2>
+        <h2>Informasi Customer</h2>
         <div className="sales-document-print-info-grid">
           <div>
             <span>No Cust</span>
             <strong>:&nbsp;&nbsp; {record.no_pelanggan || '-'}</strong>
           </div>
           <div>
-            <span>No PO</span>
-            <strong>:&nbsp;&nbsp; {record.no_po_customer || '-'}</strong>
+            <span>Sales</span>
+            <strong>:&nbsp;&nbsp; {record.nama_salesman || '-'}</strong>
           </div>
           <div>
             <span>Customer</span>
             <strong>:&nbsp;&nbsp; {record.nama_pelanggan || '-'}</strong>
           </div>
           <div>
-            <span>No SO</span>
-            <strong>:&nbsp;&nbsp; {record.so_no || '-'}</strong>
+            <span>Kota</span>
+            <strong>:&nbsp;&nbsp; {record.kota || '-'}</strong>
           </div>
           <div>
-            <span>Sales</span>
-            <strong>:&nbsp;&nbsp; {record.salesman || '-'}</strong>
+            <span>Kontak</span>
+            <strong>:&nbsp;&nbsp; {record.kontak || '-'}</strong>
           </div>
           <div>
-            <span>Tgl SO</span>
-            <strong>:&nbsp;&nbsp; {record.tgl_so ? dayjs(record.tgl_so).format('DD/MM/YYYY') : '-'}</strong>
+            <span>Telepon</span>
+            <strong>:&nbsp;&nbsp; {record.telepon || '-'}</strong>
           </div>
         </div>
       </div>
@@ -138,7 +139,7 @@ function SalesDocumentPrintSheet({ record, documentTypes }) {
   )
 }
 
-export default function KelengkapanDokumen() {
+export default function KelengkapanRegistrasiCustomer() {
   const [data, setData] = useState([])
   const [documentTypes, setDocumentTypes] = useState(DEFAULT_DOCUMENTS)
   const [summary, setSummary] = useState({ total: 0, complete: 0, incomplete: 0, unconfigured: 0 })
@@ -146,26 +147,25 @@ export default function KelengkapanDokumen() {
   const [saving, setSaving] = useState({})
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('')
-  const [dateRange, setDateRange] = useState([dayjs().startOf('year'), dayjs()])
+  const [customerStatus, setCustomerStatus] = useState('active')
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
-  const [drawerSo, setDrawerSo] = useState('')
+  const [drawerCustomer, setDrawerCustomer] = useState('')
   const [newDocumentName, setNewDocumentName] = useState('')
   const [newDepartment, setNewDepartment] = useState('MKT')
   const [addingDocument, setAddingDocument] = useState(false)
   const [printRecord, setPrintRecord] = useState(null)
-  const filtersRef = useRef({ search: '', status: '', dateRange: [dayjs().startOf('year'), dayjs()] })
-  const activeRecord = data.find(row => row.so_no === drawerSo)
+  const filtersRef = useRef({ search: '', status: '', customerStatus: 'active' })
+  const activeRecord = data.find(row => row.customer_no === drawerCustomer)
 
   const fetchData = useCallback(async (page = 1, pageSize = 20) => {
     setLoading(true)
     try {
       const filters = filtersRef.current
-      const res = await api.get('/api/sales-document-completeness', {
+      const res = await api.get('/api/customer-registration-document-completeness', {
         params: {
           search: filters.search,
           status: filters.status,
-          date_from: filters.dateRange?.[0]?.format('YYYY-MM-DD') || '',
-          date_to: filters.dateRange?.[1]?.format('YYYY-MM-DD') || '',
+          customer_status: filters.customerStatus,
           offset: (page - 1) * pageSize,
           limit: pageSize,
         },
@@ -193,10 +193,10 @@ export default function KelengkapanDokumen() {
   const saveDocument = useCallback(async (record, documentKey, changes) => {
     const current = record.documents?.[documentKey] || {}
     const next = { ...current, ...changes }
-    const savingKey = `${record.so_no}:${documentKey}`
+    const savingKey = `${record.customer_no}:${documentKey}`
     setSaving(value => ({ ...value, [savingKey]: true }))
     setData(rows => rows.map(row => {
-      if (row.so_no !== record.so_no) return row
+      if (row.customer_no !== record.customer_no) return row
       const documents = {
         ...row.documents,
         [documentKey]: { ...row.documents[documentKey], ...next },
@@ -215,8 +215,8 @@ export default function KelengkapanDokumen() {
       }
     }))
     try {
-      await api.post('/api/sales-document-completeness/checklist', {
-        so_no: record.so_no,
+      await api.post('/api/customer-registration-document-completeness/checklist', {
+        customer_no: record.customer_no,
         document_key: documentKey,
         required: next.required,
         completed: next.completed,
@@ -232,14 +232,14 @@ export default function KelengkapanDokumen() {
 
   const addCustomDocument = useCallback(async () => {
     const label = newDocumentName.trim()
-    if (!drawerSo || !label || !newDepartment) {
+    if (!drawerCustomer || !label || !newDepartment) {
       message.warning('Nama dokumen dan departemen sumber wajib diisi.')
       return
     }
     setAddingDocument(true)
     try {
-      await api.post('/api/sales-document-completeness/custom-document', {
-        so_no: drawerSo,
+      await api.post('/api/customer-registration-document-completeness/custom-document', {
+        customer_no: drawerCustomer,
         label,
         department: newDepartment,
       })
@@ -252,19 +252,19 @@ export default function KelengkapanDokumen() {
     } finally {
       setAddingDocument(false)
     }
-  }, [drawerSo, fetchData, newDepartment, newDocumentName, pagination.current, pagination.pageSize])
+  }, [drawerCustomer, fetchData, newDepartment, newDocumentName, pagination.current, pagination.pageSize])
 
   const deleteCustomDocument = useCallback(async documentKey => {
     try {
-      await api.delete('/api/sales-document-completeness/custom-document', {
-        data: { so_no: drawerSo, document_key: documentKey },
+      await api.delete('/api/customer-registration-document-completeness/custom-document', {
+        data: { customer_no: drawerCustomer, document_key: documentKey },
       })
       await fetchData(pagination.current, pagination.pageSize)
       message.success('Dokumen tambahan dihapus.')
     } catch (error) {
       message.error(getApiErrorMessage(error, 'Gagal menghapus dokumen'))
     }
-  }, [drawerSo, fetchData, pagination.current, pagination.pageSize])
+  }, [drawerCustomer, fetchData, pagination.current, pagination.pageSize])
 
   const printItem = useCallback(record => {
     setPrintRecord(record)
@@ -293,7 +293,7 @@ export default function KelengkapanDokumen() {
       const checkbox = (
         <Checkbox
           checked={Boolean(state[field])}
-          disabled={Boolean(saving[`${record.so_no}:${document.key}`])}
+          disabled={Boolean(saving[`${record.customer_no}:${document.key}`])}
           onChange={event => saveDocument(record, document.key, {
             [field]: event.target.checked,
           })}
@@ -316,10 +316,10 @@ export default function KelengkapanDokumen() {
       align: 'center',
       render: (_, __, index) => (pagination.current - 1) * pagination.pageSize + index + 1,
     },
-    { title: 'No. SO', dataIndex: 'so_no', width: 145, fixed: 'left', render: value => <Text strong>{value}</Text> },
-    { title: 'Tgl SO', dataIndex: 'tgl_so', width: 105, render: value => value ? dayjs(value).format('DD/MM/YYYY') : '-' },
+    { title: 'No Customer', dataIndex: 'customer_no', width: 145, fixed: 'left', render: value => <Text strong>{value}</Text> },
+    { title: 'Kota', dataIndex: 'kota', width: 130, render: value => value || '-' },
     { title: 'Customer', dataIndex: 'nama_pelanggan', width: 210, ellipsis: true },
-    { title: 'No. PO Customer', dataIndex: 'no_po_customer', width: 150, render: value => value || '-' },
+    { title: 'Salesman', dataIndex: 'nama_salesman', width: 170, render: value => value || '-' },
     ...(documentTypes.length ? [{
       title: 'Dokumen Wajib (ditentukan MKT)',
       className: 'document-required-group',
@@ -342,7 +342,7 @@ export default function KelengkapanDokumen() {
             size="small"
             type={documents.length ? 'default' : 'dashed'}
             icon={<PlusOutlined />}
-            onClick={() => setDrawerSo(record.so_no)}
+            onClick={() => setDrawerCustomer(record.customer_no)}
           >
             {documents.length ? `${completed}/${documents.length} Selesai` : 'Tambah'}
           </Button>
@@ -391,25 +391,24 @@ export default function KelengkapanDokumen() {
   ], [documentColumns, documentTypes.length, pagination.current, pagination.pageSize, printItem])
 
   const resetFilters = () => {
-    const nextDates = [dayjs().startOf('year'), dayjs()]
     setSearch('')
     setStatus('')
-    setDateRange(nextDates)
-    filtersRef.current = { search: '', status: '', dateRange: nextDates }
+    setCustomerStatus('active')
+    filtersRef.current = { search: '', status: '', customerStatus: 'active' }
     fetchData(1, pagination.pageSize)
   }
 
   return (
     <div>
       <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
-        <Col xs={12} md={6}><Card size="small"><Statistic title="Total SO" value={summary.total || 0} /></Card></Col>
+        <Col xs={12} md={6}><Card size="small"><Statistic title="Total Customer" value={summary.total || 0} /></Card></Col>
         <Col xs={12} md={6}><Card size="small"><Statistic title="Lengkap" value={summary.complete || 0} valueStyle={{ color: '#389e0d' }} /></Card></Col>
         <Col xs={12} md={6}><Card size="small"><Statistic title="Belum Lengkap" value={summary.incomplete || 0} valueStyle={{ color: '#d46b08' }} /></Card></Col>
         <Col xs={12} md={6}><Card size="small"><Statistic title="Belum Diatur" value={summary.unconfigured || 0} /></Card></Col>
       </Row>
 
       <Card
-        title={<Space><FileProtectOutlined style={{ color: '#1677ff' }} />Kelengkapan Dokumen Penjualan</Space>}
+        title={<Space><FileProtectOutlined style={{ color: '#1677ff' }} />Kelengkapan Dokumen Registrasi Customer</Space>}
         extra={(
           <Space wrap>
             <Select
@@ -428,19 +427,25 @@ export default function KelengkapanDokumen() {
                 applyFilters({ status: next })
               }}
             />
-            <RangePicker
-              value={dateRange}
-              format="DD/MM/YYYY"
+            <Select
+              placeholder="Status Customer"
+              style={{ width: 150 }}
+              value={customerStatus}
+              options={[
+                { value: 'active', label: 'Aktif' },
+                { value: 'inactive', label: 'Nonaktif' },
+                { value: 'all', label: 'Semua Customer' },
+              ]}
               onChange={value => {
-                setDateRange(value)
-                applyFilters({ dateRange: value })
+                setCustomerStatus(value)
+                applyFilters({ customerStatus: value })
               }}
             />
             <Search
               allowClear
               value={search}
               prefix={<SearchOutlined />}
-              placeholder="Cari SO, customer, PO..."
+              placeholder="Cari customer, no customer, kontak..."
               style={{ width: 235 }}
               onChange={event => setSearch(event.target.value)}
               onSearch={value => applyFilters({ search: value })}
@@ -451,7 +456,7 @@ export default function KelengkapanDokumen() {
       >
         <Table
           className="sales-document-table"
-          rowKey="so_no"
+          rowKey="customer_no"
           size="small"
           bordered
           sticky
@@ -462,26 +467,26 @@ export default function KelengkapanDokumen() {
           pagination={{
             ...pagination,
             showSizeChanger: true,
-            showTotal: total => `${total} Sales Order`,
+            showTotal: total => `${total} Customer`,
           }}
           onChange={next => fetchData(next.current, next.pageSize)}
-          locale={{ emptyText: 'Tidak ada Sales Order pada periode ini.' }}
+          locale={{ emptyText: 'Tidak ada Customer pada filter ini.' }}
         />
         <Space style={{ marginTop: 12 }}>
           <CheckCircleOutlined style={{ color: '#52c41a' }} />
           <Text type="secondary">
-            Dokumen bersifat opsional. Tambahkan dokumen per SO bila diperlukan, lalu tandai wajib hanya jika dokumen tersebut harus masuk progres.
+            Dokumen bersifat opsional. Tambahkan dokumen per customer bila diperlukan, lalu tandai wajib hanya jika dokumen tersebut harus masuk progres.
           </Text>
         </Space>
       </Card>
 
       <Drawer
-        title={`Dokumen Tambahan • ${drawerSo || '-'}`}
+        title={`Dokumen Tambahan - ${drawerCustomer || '-'}`}
         width={560}
-        open={Boolean(drawerSo)}
-        onClose={() => setDrawerSo('')}
+        open={Boolean(drawerCustomer)}
+        onClose={() => setDrawerCustomer('')}
       >
-        <Card size="small" title="Tambah Dokumen Khusus Customer" style={{ marginBottom: 16 }}>
+        <Card size="small" title="Tambah Dokumen Registrasi Customer" style={{ marginBottom: 16 }}>
           <Space.Compact style={{ width: '100%' }}>
             <Select
               value={newDepartment}
@@ -514,7 +519,7 @@ export default function KelengkapanDokumen() {
         </Card>
 
         {(activeRecord?.custom_documents || []).length === 0 ? (
-          <Empty description="Belum ada dokumen tambahan untuk SO ini." />
+          <Empty description="Belum ada dokumen tambahan untuk customer ini." />
         ) : (
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             {(activeRecord?.custom_documents || []).map(document => (
@@ -546,7 +551,7 @@ export default function KelengkapanDokumen() {
                     <Space>
                       <Checkbox
                         checked={document.required}
-                        disabled={Boolean(saving[`${activeRecord.so_no}:${document.key}`])}
+                        disabled={Boolean(saving[`${activeRecord.customer_no}:${document.key}`])}
                         onChange={event => saveDocument(activeRecord, document.key, {
                           required: event.target.checked,
                         })}
@@ -558,7 +563,7 @@ export default function KelengkapanDokumen() {
                     <Space>
                       <Checkbox
                         checked={document.completed}
-                        disabled={Boolean(saving[`${activeRecord.so_no}:${document.key}`])}
+                        disabled={Boolean(saving[`${activeRecord.customer_no}:${document.key}`])}
                         onChange={event => saveDocument(activeRecord, document.key, {
                           completed: event.target.checked,
                         })}
@@ -584,7 +589,8 @@ export default function KelengkapanDokumen() {
         )}
       </Drawer>
 
-      <SalesDocumentPrintSheet record={printRecord} documentTypes={documentTypes} />
+      <CustomerRegistrationPrintSheet record={printRecord} documentTypes={documentTypes} />
     </div>
   )
 }
+

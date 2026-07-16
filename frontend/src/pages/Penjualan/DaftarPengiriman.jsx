@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import {
   Table, Input, Card, DatePicker, Select, Space, Tag, Tooltip,
   Statistic, Row, Col, Typography, Button, message
@@ -13,6 +13,7 @@ import { exportRowsToXLS } from '../../utils/exportXls'
 import { withTableSorters } from '../../utils/tableSorters'
 import { useAuth } from '../../context/AuthContext'
 import { filterColumnsByPermission, filterExportColumnsByPermission } from '../../utils/columnPermissions'
+import useVisiblePolling from '../../hooks/useVisiblePolling'
 import dayjs from 'dayjs'
 
 const { Search }     = Input
@@ -308,6 +309,7 @@ export default function DaftarPengiriman() {
     complete_so: 0,
   })
   const token = localStorage.getItem('token')
+  const fetchInFlightRef = useRef(false)
 
   const fetchData = useCallback(async (
     page = 1,
@@ -318,7 +320,10 @@ export default function DaftarPengiriman() {
     keteranganValue = '',
     statusValue = '',
     showLoading = true,
+    skipIfBusy = false,
   ) => {
+    if (skipIfBusy && fetchInFlightRef.current) return
+    fetchInFlightRef.current = true
     if (showLoading) setLoading(true)
     try {
       const params = { offset: (page - 1) * pageSize, limit: pageSize }
@@ -350,6 +355,7 @@ export default function DaftarPengiriman() {
       console.error('Error fetch DO:', e)
       message.error('Gagal memuat data pengiriman')
     } finally {
+      fetchInFlightRef.current = false
       if (showLoading) setLoading(false)
     }
   }, [token])
@@ -358,24 +364,19 @@ export default function DaftarPengiriman() {
     fetchData(1, 20, '', getCurrentMonthRange(), '', '', '')
   }, [fetchData])
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      fetchData(
-        pagination.current,
-        pagination.pageSize,
-        search,
-        dateRange,
-        marketing,
-        keteranganSo,
-        statusDo,
-        false,
-      )
-    }, 10000)
-    return () => clearInterval(interval)
-  }, [
-    dateRange, fetchData, keteranganSo, marketing,
-    pagination.current, pagination.pageSize, search, statusDo,
-  ])
+  useVisiblePolling(() => {
+    fetchData(
+      pagination.current,
+      pagination.pageSize,
+      search,
+      dateRange,
+      marketing,
+      keteranganSo,
+      statusDo,
+      false,
+      true,
+    )
+  }, 30000, true, false)
 
   const handleSearch = (val) => {
     setSearch(val)
@@ -580,7 +581,7 @@ export default function DaftarPengiriman() {
               icon={exporting ? <LoadingOutlined /> : <FileExcelOutlined />}
               onClick={handleExport}
               disabled={exporting}
-              style={{ background: '#217346', borderColor: '#217346' }}
+              style={{ background: '#087ff5', borderColor: '#087ff5' }}
             >
               {exporting ? 'Mengekspor...' : 'Export XLS'}
             </Button>

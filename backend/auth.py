@@ -13,9 +13,12 @@ MARKETING_MODULES = [
     "penjualan_so",
     "penjualan_do",
     "customer",
+    "customer_registration_documents",
     "salesman",
     "kolaborasi",
 ]
+
+FEE_MARKETING_ROLE = "marketing_fee"
 
 ACCOUNTING_ROLE_MODULES = [
     "dashboard",
@@ -31,15 +34,224 @@ ACCOUNTING_ROLE_MODULES = [
     "penjualan_do",
     "invoice",
     "customer",
+    "customer_registration_documents",
     "salesman",
     "kolaborasi",
     "project",
     "akuntansi",
+    "fee_submission",
 ]
+
+
+def ensure_fee_submission_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS fee_submission_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_no TEXT NOT NULL UNIQUE,
+            fee_type TEXT NOT NULL,
+            salesman_id INTEGER NOT NULL,
+            salesman_name TEXT NOT NULL,
+            submitted_by TEXT NOT NULL,
+            submitted_name TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            transaction_date TEXT NOT NULL DEFAULT ''
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS fee_submissions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            so_no TEXT NOT NULL,
+            fee_type TEXT NOT NULL,
+            salesman_id INTEGER NOT NULL,
+            salesman_name TEXT NOT NULL,
+            dpp REAL NOT NULL DEFAULT 0,
+            rate_pct REAL NOT NULL DEFAULT 0,
+            amount REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'submitted',
+            submitted_by TEXT NOT NULL,
+            submitted_name TEXT NOT NULL,
+            submitted_at TEXT NOT NULL,
+            reviewed_by TEXT,
+            reviewed_at TEXT,
+            review_note TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            batch_id INTEGER,
+            batch_no TEXT NOT NULL DEFAULT '',
+            customer_no TEXT NOT NULL DEFAULT '',
+            customer_name TEXT NOT NULL DEFAULT '',
+            customer_po TEXT NOT NULL DEFAULT '',
+            UNIQUE(so_no, fee_type)
+        )
+    """)
+    cur.execute("PRAGMA table_info(fee_submissions)")
+    columns = {row[1] for row in cur.fetchall()}
+    migrations = {
+        "batch_id": "ALTER TABLE fee_submissions ADD COLUMN batch_id INTEGER",
+        "batch_no": "ALTER TABLE fee_submissions ADD COLUMN batch_no TEXT NOT NULL DEFAULT ''",
+        "customer_no": "ALTER TABLE fee_submissions ADD COLUMN customer_no TEXT NOT NULL DEFAULT ''",
+        "customer_name": "ALTER TABLE fee_submissions ADD COLUMN customer_name TEXT NOT NULL DEFAULT ''",
+        "customer_po": "ALTER TABLE fee_submissions ADD COLUMN customer_po TEXT NOT NULL DEFAULT ''",
+        "transaction_date": "ALTER TABLE fee_submissions ADD COLUMN transaction_date TEXT NOT NULL DEFAULT ''",
+    }
+    for column, statement in migrations.items():
+        if column not in columns:
+            cur.execute(statement)
+    cur.execute("PRAGMA table_info(fee_submission_batches)")
+    batch_columns = {row[1] for row in cur.fetchall()}
+    if "transaction_date" not in batch_columns:
+        cur.execute("ALTER TABLE fee_submission_batches ADD COLUMN transaction_date TEXT NOT NULL DEFAULT ''")
+
+
+def create_fee_submission_batch(fee_type, salesman_id, salesman_name, submitted_by, submitted_name, note="", transaction_date=""):
+    now = datetime.now().isoformat(timespec="seconds")
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_fee_submission_table(cur)
+    temporary_no = f"TMP-{fee_type}-{submitted_by}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+    cur.execute("""
+        INSERT INTO fee_submission_batches
+        (batch_no, fee_type, salesman_id, salesman_name, submitted_by, submitted_name, submitted_at, note, transaction_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (temporary_no, fee_type, salesman_id, salesman_name, submitted_by, submitted_name, now, note or "", transaction_date or ""))
+    cur.execute("SELECT id FROM fee_submission_batches WHERE batch_no = ?", (temporary_no,))
+    batch_id = int(cur.fetchone()[0])
+    batch_no = f"REQ-{fee_type}-{datetime.now().strftime('%y%m%d')}-{batch_id:04d}"
+    cur.execute("UPDATE fee_submission_batches SET batch_no = ? WHERE id = ?", (batch_no, batch_id))
+    con.commit()
+    con.close()
+    return {"id": batch_id, "batch_no": batch_no, "submitted_at": now, "transaction_date": transaction_date or ""}
+
+
+def get_fee_submissions(so_nos=None):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_fee_submission_table(cur)
+    params = []
+    where = ""
+    clean_so_nos = sorted({str(value or "").strip().upper() for value in (so_nos or []) if str(value or "").strip()})
+    if clean_so_nos:
+        where = f"WHERE UPPER(so_no) IN ({','.join(['?'] * len(clean_so_nos))})"
+        params = clean_so_nos
+    cur.execute(f"""
+        SELECT id, so_no, fee_type, salesman_id, salesman_name, dpp, rate_pct,
+               amount, status, submitted_by, submitted_name, submitted_at,
+               reviewed_by, reviewed_at, review_note, updated_at,
+               batch_id, batch_no, customer_no, customer_name, customer_po, transaction_date
+        FROM fee_submissions
+        {where}
+        ORDER BY submitted_at DESC, id DESC
+    """, params)
+    keys = ["id", "so_no", "fee_type", "salesman_id", "salesman_name", "dpp", "rate_pct",
+            "amount", "status", "submitted_by", "submitted_name", "submitted_at",
+            "reviewed_by", "reviewed_at", "review_note", "updated_at",
+            "batch_id", "batch_no", "customer_no", "customer_name", "customer_po", "transaction_date"]
+    data = [dict(zip(keys, row)) for row in cur.fetchall()]
+    con.close()
+    return data
+
+
+def save_fee_submission(so_no, fee_type, salesman_id, salesman_name, dpp, rate_pct,
+                        amount, submitted_by, submitted_name, batch_id=None, batch_no="",
+                        customer_no="", customer_name="", customer_po="", transaction_date=""):
+    now = datetime.now().isoformat(timespec="seconds")
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_fee_submission_table(cur)
+    cur.execute("SELECT id, status FROM fee_submissions WHERE so_no = ? AND fee_type = ?", (so_no, fee_type))
+    existing = cur.fetchone()
+    if existing and existing[1] not in ("rejected", "draft"):
+        con.close()
+        return False, "Pengajuan sudah pernah dikirim untuk transaksi ini", None
+    if existing:
+        cur.execute("""
+            UPDATE fee_submissions
+            SET salesman_id=?, salesman_name=?, dpp=?, rate_pct=?, amount=?,
+                status='submitted', submitted_by=?, submitted_name=?, submitted_at=?,
+                reviewed_by=NULL, reviewed_at=NULL, review_note='', updated_at=?,
+                batch_id=?, batch_no=?, customer_no=?, customer_name=?, customer_po=?, transaction_date=?
+            WHERE id=?
+        """, (salesman_id, salesman_name, dpp, rate_pct, amount, submitted_by,
+              submitted_name, now, now, batch_id, batch_no, customer_no,
+              customer_name, customer_po, transaction_date, existing[0]))
+        submission_id = existing[0]
+    else:
+        cur.execute("""
+            INSERT INTO fee_submissions
+            (so_no, fee_type, salesman_id, salesman_name, dpp, rate_pct, amount,
+             status, submitted_by, submitted_name, submitted_at, updated_at,
+             batch_id, batch_no, customer_no, customer_name, customer_po, transaction_date)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'submitted', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (so_no, fee_type, salesman_id, salesman_name, dpp, rate_pct, amount,
+              submitted_by, submitted_name, now, now, batch_id, batch_no,
+              customer_no, customer_name, customer_po, transaction_date))
+        cur.execute("SELECT id FROM fee_submissions WHERE so_no = ? AND fee_type = ?", (so_no, fee_type))
+        submission_id = cur.fetchone()[0]
+    con.commit()
+    con.close()
+    return True, "Pengajuan berhasil dikirim", submission_id
+
+
+def review_fee_submission(submission_id, action, reviewed_by, note=""):
+    status = "approved" if action == "approve" else "rejected"
+    now = datetime.now().isoformat(timespec="seconds")
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_fee_submission_table(cur)
+    cur.execute("SELECT batch_id FROM fee_submissions WHERE id=? AND status='submitted'", (submission_id,))
+    source = cur.fetchone()
+    if not source:
+        con.close()
+        return False
+    batch_id = source[0]
+    target_where = "batch_id=? AND status='submitted'" if batch_id is not None else "id=? AND status='submitted'"
+    target_value = batch_id if batch_id is not None else submission_id
+    cur.execute("""
+        UPDATE fee_submissions
+        SET status=?, reviewed_by=?, reviewed_at=?, review_note=?, updated_at=?
+        WHERE """ + target_where, (status, reviewed_by, now, note, now, target_value))
+    updated = cur.rowcount
+    con.commit()
+    con.close()
+    return updated > 0
+
+
+def delete_fee_submission(submission_id):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_fee_submission_table(cur)
+    cur.execute("""
+        SELECT id, so_no, fee_type, status, batch_id, batch_no
+        FROM fee_submissions
+        WHERE id = ? AND status = 'submitted'
+    """, (submission_id,))
+    row = cur.fetchone()
+    if not row:
+        con.close()
+        return None
+    deleted = {
+        "id": row[0], "so_no": row[1], "fee_type": row[2],
+        "status": row[3], "batch_id": row[4], "batch_no": row[5],
+    }
+    if row[4] is not None:
+        cur.execute("SELECT COUNT(*) FROM fee_submissions WHERE batch_id = ? AND status = 'submitted'", (row[4],))
+        deleted["count"] = int(cur.fetchone()[0] or 0)
+        cur.execute("DELETE FROM fee_submissions WHERE batch_id = ? AND status = 'submitted'", (row[4],))
+    else:
+        deleted["count"] = 1
+        cur.execute("DELETE FROM fee_submissions WHERE id = ? AND status = 'submitted'", (submission_id,))
+    if row[4] is not None:
+        cur.execute("SELECT COUNT(*) FROM fee_submissions WHERE batch_id = ?", (row[4],))
+        if int(cur.fetchone()[0] or 0) == 0:
+            cur.execute("DELETE FROM fee_submission_batches WHERE id = ?", (row[4],))
+    con.commit()
+    con.close()
+    return deleted
 
 AKUTANSI_STAFF_MODULES = [
     "akuntansi",
     "project",
+    "fee_submission",
 ]
 
 BARANG_BARU_EXCLUDED_PREFIXES = (
@@ -109,6 +321,12 @@ def sync_marketing_permissions(cur):
         "INSERT OR IGNORE INTO role_column_permissions (role, module, column_key) VALUES (?, ?, ?)",
         [("marketing", "pembelian", column_key) for column_key in MARKETING_PEMBELIAN_COLUMNS],
     )
+
+
+def sync_fee_marketing_permissions(cur):
+    cur.execute("DELETE FROM roles WHERE role = ? AND module <> 'fee_submission'", (FEE_MARKETING_ROLE,))
+    cur.execute("INSERT OR IGNORE INTO roles (role, module) VALUES (?, 'fee_submission')", (FEE_MARKETING_ROLE,))
+    cur.execute("DELETE FROM role_column_permissions WHERE role = ?", (FEE_MARKETING_ROLE,))
 
 
 def sync_akutansi_staff_permissions(cur):
@@ -261,6 +479,34 @@ def ensure_sales_document_checklist_table(cur):
         cur.execute("ALTER TABLE sales_document_checklist ADD COLUMN is_custom INTEGER NOT NULL DEFAULT 0")
 
 
+def ensure_customer_registration_document_checklist_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS customer_registration_document_checklist (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_no TEXT NOT NULL,
+            document_key TEXT NOT NULL,
+            is_required INTEGER NOT NULL DEFAULT 0,
+            is_completed INTEGER NOT NULL DEFAULT 0,
+            updated_by TEXT,
+            updated_at TEXT NOT NULL,
+            validated_by TEXT,
+            validated_at TEXT,
+            document_label TEXT NOT NULL DEFAULT '',
+            department TEXT NOT NULL DEFAULT '',
+            is_custom INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(customer_no, document_key)
+        )
+    """)
+    cur.execute("PRAGMA table_info(customer_registration_document_checklist)")
+    columns = {row[1] for row in cur.fetchall()}
+    if "document_label" not in columns:
+        cur.execute("ALTER TABLE customer_registration_document_checklist ADD COLUMN document_label TEXT NOT NULL DEFAULT ''")
+    if "department" not in columns:
+        cur.execute("ALTER TABLE customer_registration_document_checklist ADD COLUMN department TEXT NOT NULL DEFAULT ''")
+    if "is_custom" not in columns:
+        cur.execute("ALTER TABLE customer_registration_document_checklist ADD COLUMN is_custom INTEGER NOT NULL DEFAULT 0")
+
+
 def ensure_part_number_history_tables(cur):
     cur.execute("""
         CREATE TABLE IF NOT EXISTS customer_part_number (
@@ -357,6 +603,12 @@ def init_db():
             role TEXT NOT NULL DEFAULT 'viewer'
         )
     """)
+    cur.execute("PRAGMA table_info(users)")
+    user_columns = {row[1] for row in cur.fetchall()}
+    if "salesman_id" not in user_columns:
+        cur.execute("ALTER TABLE users ADD COLUMN salesman_id INTEGER")
+    if "salesman_name" not in user_columns:
+        cur.execute("ALTER TABLE users ADD COLUMN salesman_name TEXT NOT NULL DEFAULT ''")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS roles (
@@ -433,10 +685,12 @@ def init_db():
     ensure_project_remarks_table(cur)
     ensure_profit_loss_manual_cost_table(cur)
     ensure_sales_document_checklist_table(cur)
+    ensure_customer_registration_document_checklist_table(cur)
     ensure_part_number_history_tables(cur)
     ensure_purchase_request_remarks_table(cur)
     ensure_sales_delivery_remarks_table(cur)
     ensure_delivery_time_tracking_table(cur)
+    ensure_fee_submission_table(cur)
 
     # ── Permission Matrix ──────────────────────────────────────────────────
     # admin     → semua modul
@@ -451,7 +705,7 @@ def init_db():
         ("admin",      "pembelian"), ("admin",      "penjualan"),
         ("admin",      "users"),     ("admin",      "spk"),
         ("admin",      "akuntansi"), ("admin",      "audit"),
-        ("admin",      "project"),
+        ("admin",      "project"),   ("admin",      "fee_submission"),
 
         ("inventory",  "dashboard"), ("inventory",  "stock"),
         ("inventory",  "barang-baru"), ("inventory","riwayat"),
@@ -465,7 +719,8 @@ def init_db():
         ("marketing",  "dashboard"), ("marketing",  "stock"),
         ("marketing",  "penjualan"), ("marketing",  "pembelian"),
         ("marketing",  "penjualan_so"), ("marketing",  "penjualan_do"),
-        ("marketing",  "customer"), ("marketing",  "salesman"),
+        ("marketing",  "customer"), ("marketing", "customer_registration_documents"),
+        ("marketing",  "salesman"),
 
         ("produksi",   "dashboard"), ("produksi",   "stock"),
         ("produksi",   "spk"),
@@ -479,6 +734,7 @@ def init_db():
     # INSERT OR IGNORE = idempotent, aman dijalankan berulang kali
     cur.executemany("INSERT OR IGNORE INTO roles (role, module) VALUES (?, ?)", roles)
     sync_marketing_permissions(cur)
+    sync_fee_marketing_permissions(cur)
     sync_akutansi_staff_permissions(cur)
 
     cur.execute("SELECT COUNT(*) FROM users WHERE username = 'admin'")
@@ -497,11 +753,11 @@ def init_db():
 def get_user(username):
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
-    cur.execute("SELECT id, username, password, name, role FROM users WHERE username = ?", (username,))
+    cur.execute("SELECT id, username, password, name, role, salesman_id, salesman_name FROM users WHERE username = ?", (username,))
     row = cur.fetchone()
     con.close()
     if row:
-        return {"id": row[0], "username": row[1], "password": row[2], "name": row[3], "role": row[4]}
+        return {"id": row[0], "username": row[1], "password": row[2], "name": row[3], "role": row[4], "salesman_id": row[5], "salesman_name": row[6] or ""}
     return None
 
 def get_user_permissions(role):
@@ -509,6 +765,8 @@ def get_user_permissions(role):
     cur = con.cursor()
     if role == "marketing":
         sync_marketing_permissions(cur)
+    elif role == FEE_MARKETING_ROLE:
+        sync_fee_marketing_permissions(cur)
         con.commit()
     elif role == "akutansi_staff":
         sync_akutansi_staff_permissions(cur)
@@ -521,19 +779,19 @@ def get_user_permissions(role):
 def get_all_users():
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
-    cur.execute("SELECT id, username, name, role FROM users ORDER BY id")
+    cur.execute("SELECT id, username, name, role, salesman_id, salesman_name FROM users ORDER BY id")
     rows = cur.fetchall()
     con.close()
-    return [{"id": r[0], "username": r[1], "name": r[2], "role": r[3]} for r in rows]
+    return [{"id": r[0], "username": r[1], "name": r[2], "role": r[3], "salesman_id": r[4], "salesman_name": r[5] or ""} for r in rows]
 
 def get_user_by_id(user_id):
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
-    cur.execute("SELECT id, username, name, role FROM users WHERE id = ?", (user_id,))
+    cur.execute("SELECT id, username, name, role, salesman_id, salesman_name FROM users WHERE id = ?", (user_id,))
     row = cur.fetchone()
     con.close()
     if row:
-        return {"id": row[0], "username": row[1], "name": row[2], "role": row[3]}
+        return {"id": row[0], "username": row[1], "name": row[2], "role": row[3], "salesman_id": row[4], "salesman_name": row[5] or ""}
     return None
 
 def get_all_roles():
@@ -633,14 +891,14 @@ def delete_role(role):
     finally:
         con.close()
 
-def create_user(username, password, name, role):
+def create_user(username, password, name, role, salesman_id=None, salesman_name=""):
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
     try:
         hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
         cur.execute(
-            "INSERT INTO users (username, password, name, role) VALUES (?, ?, ?, ?)",
-            (username, hashed, name, role)
+            "INSERT INTO users (username, password, name, role, salesman_id, salesman_name) VALUES (?, ?, ?, ?, ?, ?)",
+            (username, hashed, name, role, salesman_id, salesman_name or "")
         )
         con.commit()
         return True, "User berhasil dibuat"
@@ -648,6 +906,19 @@ def create_user(username, password, name, role):
         return False, "Username sudah dipakai"
     finally:
         con.close()
+
+
+def update_user_salesman(user_id, salesman_id=None, salesman_name=""):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(
+        "UPDATE users SET salesman_id = ?, salesman_name = ? WHERE id = ?",
+        (salesman_id, salesman_name or "", user_id),
+    )
+    updated = cur.rowcount
+    con.commit()
+    con.close()
+    return updated > 0
 
 def update_user_password(user_id, password):
     if not password or len(password) < 6:
@@ -1304,7 +1575,7 @@ def save_sales_document_checklist(
     normalized_so = str(so_no or "").strip()
     normalized_key = str(document_key or "").strip().lower()
     required = bool(is_required)
-    completed = bool(is_completed) if required else False
+    completed = bool(is_completed)
     now = datetime.now().isoformat(timespec="seconds")
 
     con = sqlite3.connect(DB_PATH)
@@ -1375,6 +1646,137 @@ def delete_sales_custom_document(so_no, document_key):
         WHERE so_no = ? AND document_key = ? AND is_custom = 1
     """, (
         str(so_no or "").strip(),
+        str(document_key or "").strip().lower(),
+    ))
+    deleted = cur.rowcount > 0
+    con.commit()
+    con.close()
+    return deleted
+
+
+def get_customer_registration_document_checklists(customer_numbers):
+    normalized = sorted({
+        str(customer_no or "").strip()
+        for customer_no in customer_numbers
+        if str(customer_no or "").strip()
+    })
+    if not normalized:
+        return {}
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_customer_registration_document_checklist_table(cur)
+    result = {}
+    for index in range(0, len(normalized), 900):
+        chunk = normalized[index:index + 900]
+        placeholders = ", ".join(["?"] * len(chunk))
+        cur.execute(f"""
+            SELECT customer_no, document_key, is_required, is_completed,
+                   updated_by, updated_at, validated_by, validated_at,
+                   document_label, department, is_custom
+            FROM customer_registration_document_checklist
+            WHERE customer_no IN ({placeholders})
+        """, chunk)
+        for row in cur.fetchall():
+            result.setdefault(row[0], {})[row[1]] = {
+                "required": bool(row[2]),
+                "completed": bool(row[3]),
+                "updated_by": row[4] or "",
+                "updated_at": row[5] or "",
+                "validated_by": row[6] or "",
+                "validated_at": row[7] or "",
+                "label": row[8] or "",
+                "department": row[9] or "",
+                "is_custom": bool(row[10]),
+            }
+    con.close()
+    return result
+
+
+def save_customer_registration_document_checklist(
+    customer_no,
+    document_key,
+    is_required,
+    is_completed,
+    updated_by=None,
+    document_label="",
+    department="",
+    is_custom=False,
+):
+    normalized_customer = str(customer_no or "").strip()
+    normalized_key = str(document_key or "").strip().lower()
+    required = bool(is_required)
+    completed = bool(is_completed)
+    now = datetime.now().isoformat(timespec="seconds")
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_customer_registration_document_checklist_table(cur)
+    cur.execute("""
+        INSERT INTO customer_registration_document_checklist (
+            customer_no, document_key, is_required, is_completed,
+            updated_by, updated_at, validated_by, validated_at,
+            document_label, department, is_custom
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(customer_no, document_key) DO UPDATE SET
+            is_required = excluded.is_required,
+            is_completed = excluded.is_completed,
+            updated_by = excluded.updated_by,
+            updated_at = excluded.updated_at,
+            validated_by = excluded.validated_by,
+            validated_at = excluded.validated_at,
+            document_label = CASE
+                WHEN excluded.document_label <> '' THEN excluded.document_label
+                ELSE customer_registration_document_checklist.document_label
+            END,
+            department = CASE
+                WHEN excluded.department <> '' THEN excluded.department
+                ELSE customer_registration_document_checklist.department
+            END,
+            is_custom = CASE
+                WHEN excluded.is_custom = 1 THEN 1
+                ELSE customer_registration_document_checklist.is_custom
+            END
+    """, (
+        normalized_customer,
+        normalized_key,
+        int(required),
+        int(completed),
+        updated_by,
+        now,
+        updated_by if completed else None,
+        now if completed else None,
+        str(document_label or "").strip(),
+        str(department or "").strip().upper(),
+        int(bool(is_custom)),
+    ))
+    con.commit()
+    con.close()
+    return {
+        "customer_no": normalized_customer,
+        "document_key": normalized_key,
+        "required": required,
+        "completed": completed,
+        "updated_by": updated_by or "",
+        "updated_at": now,
+        "validated_by": updated_by or "" if completed else "",
+        "validated_at": now if completed else "",
+        "label": str(document_label or "").strip(),
+        "department": str(department or "").strip().upper(),
+        "is_custom": bool(is_custom),
+    }
+
+
+def delete_customer_registration_custom_document(customer_no, document_key):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    ensure_customer_registration_document_checklist_table(cur)
+    cur.execute("""
+        DELETE FROM customer_registration_document_checklist
+        WHERE customer_no = ? AND document_key = ? AND is_custom = 1
+    """, (
+        str(customer_no or "").strip(),
         str(document_key or "").strip().lower(),
     ))
     deleted = cur.rowcount > 0

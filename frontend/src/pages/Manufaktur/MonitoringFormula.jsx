@@ -8,7 +8,7 @@ import {
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import api, { getApiErrorMessage } from '../../api/client'
-import { downloadHtmlXLS } from '../../utils/exportXls'
+import { downloadWorkbookXLS } from '../../utils/exportXls'
 import { withTableSorters } from '../../utils/tableSorters'
 import { useAuth } from '../../context/AuthContext'
 import { filterColumnsByPermission, filterExportColumnsByPermission } from '../../utils/columnPermissions'
@@ -483,7 +483,14 @@ export default function MonitoringFormula() {
         return
       }
 
-      downloadHtmlXLS(buildReportHtml(exportRows), 'MonitoringFormula', 'Monitoring Formula')
+      const mainColumns = filterExportColumnsByPermission('monitoring_formula', MONITORING_FORMULA_EXPORT_COLS, user)
+      const mainRows = exportRows.map(row => ({
+        ...row,
+        no_hasil_produksi: productionResultNos(row),
+      }))
+      downloadWorkbookXLS([
+        { name: 'Monitoring Formula', columns: mainColumns, rows: mainRows },
+      ], 'MonitoringFormula')
 
       try {
         await api.post('/api/audit/event', {
@@ -1427,7 +1434,7 @@ export default function MonitoringFormula() {
               icon={<FileExcelOutlined />}
               onClick={handleExport}
               loading={exporting}
-              style={{ background: '#217346', borderColor: '#217346' }}
+              style={{ background: '#087ff5', borderColor: '#087ff5' }}
             >
               Export XLS
             </Button>

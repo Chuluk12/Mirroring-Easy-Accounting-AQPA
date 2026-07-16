@@ -529,11 +529,6 @@ export default function Stock() {
           icon={<FileExcelOutlined />}
           onClick={handleExport}
           loading={exporting}
-          style={{
-            background: 'linear-gradient(135deg, #d41452 0%, #e018a8 52%, #7c3cff 100%)',
-            borderColor: '#d41452',
-            color: '#fff',
-          }}
         >
           Export XLS
         </Button>

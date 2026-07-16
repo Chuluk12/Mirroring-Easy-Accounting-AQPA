@@ -26,31 +26,48 @@ export default function Login() {
   return (
     <div className="easy-login">
       <div className="easy-login-pattern" />
-      <Card className="easy-login-card">
-        <div style={{ textAlign: 'center', marginBottom: 30 }}>
-          <div className="easy-login-logo-wrap">
-            <img src="/logo.png" alt="logo" className="easy-login-logo" />
+      <div className="easy-login-shell">
+        <section className="easy-login-showcase">
+          <div className="easy-login-showcase-top">
+            <img src="/aqpa-indonesia-logo.png" alt="AQPA Indonesia" className="easy-login-wordmark" />
           </div>
-          <h2 style={{ margin: '12px 0 4px', color: '#20243a' }}>Easy Dashboard</h2>
-          <p style={{ color: '#697087', margin: 0 }}>Accounting Monitoring System</p>
-        </div>
-        <Form onFinish={onFinish} layout="vertical">
-          <Form.Item name="username" rules={[{ required: true, message: 'Masukkan username!' }]}>
-            <Input prefix={<UserOutlined />} placeholder="Username" size="large" />
-          </Form.Item>
-          <Form.Item name="password" rules={[{ required: true, message: 'Masukkan password!' }]}>
-            <Input.Password prefix={<LockOutlined />} placeholder="Password" size="large" />
-          </Form.Item>
-          <Form.Item>
-            <Button type="primary" htmlType="submit" block size="large" loading={loading}>
-              Login
-            </Button>
-          </Form.Item>
-        </Form>
-        <p style={{ textAlign: 'center', color: '#99a1b3', fontSize: 12, margin: 0 }}>
-          (c) 2026 Easy Accounting Monitoring System
-        </p>
-      </Card>
+          <div className="easy-login-showcase-copy">
+            <span className="easy-login-kicker">Integrated Business Monitoring</span>
+            <h1>AQPA Indonesia Dashboard</h1>
+            <p>Kontrol data accounting, persediaan, pembelian, penjualan, dan project dalam satu ruang kerja.</p>
+          </div>
+          <div className="easy-login-metrics" aria-hidden="true">
+            <span>ERP</span>
+            <span>Finance</span>
+            <span>Operations</span>
+          </div>
+        </section>
+        <Card className="easy-login-card">
+          <div className="easy-login-card-head">
+            <div className="easy-login-logo-wrap">
+              <img src="/aqpa-indonesia-logo.png" alt="AQPA Indonesia" className="easy-login-logo" />
+            </div>
+            <h2>Masuk Dashboard</h2>
+            <p>Gunakan akun internal AQPA Indonesia</p>
+          </div>
+          <Form onFinish={onFinish} layout="vertical">
+            <Form.Item name="username" rules={[{ required: true, message: 'Masukkan username!' }]}>
+              <Input prefix={<UserOutlined />} placeholder="Username" size="large" />
+            </Form.Item>
+            <Form.Item name="password" rules={[{ required: true, message: 'Masukkan password!' }]}>
+              <Input.Password prefix={<LockOutlined />} placeholder="Password" size="large" />
+            </Form.Item>
+            <Form.Item>
+              <Button type="primary" htmlType="submit" block size="large" loading={loading}>
+                Login
+              </Button>
+            </Form.Item>
+          </Form>
+          <p className="easy-login-footer">
+            (c) 2026 AQPA Indonesia Monitoring System
+          </p>
+        </Card>
+      </div>
     </div>
   )
 }

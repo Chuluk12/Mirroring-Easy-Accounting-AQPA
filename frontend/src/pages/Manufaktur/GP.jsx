@@ -9,6 +9,7 @@ import {
   MinusCircleOutlined, ExperimentOutlined
 } from '@ant-design/icons'
 import api from '../../api/client'
+import { exportRowsToXLS } from '../../utils/exportXls'
 import { withTableSorters } from '../../utils/tableSorters'
 import { useAuth } from '../../context/AuthContext'
 import { filterColumnsByPermission, filterExportColumnsByPermission } from '../../utils/columnPermissions'
@@ -38,96 +39,21 @@ const GP_EXPORT_COLS = [
   { key: 'status',           label: 'Status' },
 ]
 
-function escapeCell(value) {
-  return (value ?? '').toString()
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
-function formatExportValue(row, column) {
-  const value = row[column.key]
-  if (column.type === 'date') return value ? dayjs(value).format('DD/MM/YYYY') : ''
-  if (column.type === 'number') return Number(value || 0)
-  return value ?? ''
-}
-
-function downloadXLS(rows, columns, filename) {
-  const header = columns.map(column => (
-    `<th style="background:#217346;color:#ffffff;font-weight:bold;">${escapeCell(column.label)}</th>`
-  )).join('')
-
-  const body = rows.map(row => (
-    `<tr>${columns.map(column => {
-      const value = formatExportValue(row, column)
-      const align = column.type === 'number' ? 'right' : 'left'
-      return `<td style="text-align:${align};mso-number-format:'\\@';">${escapeCell(value)}</td>`
-    }).join('')}</tr>`
-  )).join('')
-
-  const html = `
-    <html xmlns:o="urn:schemas-microsoft-com:office:office"
-          xmlns:x="urn:schemas-microsoft-com:office:excel"
-          xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
-      <head>
-        <meta charset="UTF-8" />
-        <!--[if gte mso 9]>
-        <xml>
-          <x:ExcelWorkbook>
-            <x:ExcelWorksheets>
-              <x:ExcelWorksheet>
-                <x:Name>Hasil Produksi</x:Name>
-                <x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions>
-              </x:ExcelWorksheet>
-            </x:ExcelWorksheets>
-          </x:ExcelWorkbook>
-        </xml>
-        <![endif]-->
-      </head>
-      <body>
-        <table border="1">
-          <thead><tr>${header}</tr></thead>
-          <tbody>${body}</tbody>
-        </table>
-      </body>
-    </html>
-  `
-
-  const blob = new Blob(['\uFEFF' + html], { type: 'application/vnd.ms-excel;charset=utf-8;' })
-  const url  = URL.createObjectURL(blob)
-  const a    = document.createElement('a')
-  a.href = url
-  a.download = `${filename}_${dayjs().format('YYYYMMDD_HHmm')}.xls`
-  a.click()
-  URL.revokeObjectURL(url)
-}
-
 async function exportData({ params, columns, setExporting }) {
-  setExporting(true)
-  message.loading({ content: 'Mengambil semua data GP...', key: 'export', duration: 0 })
-  try {
-    const res  = await api.get(`/api/gp/export`, { params })
-    const rows = res.data.data || []
-    if (!rows.length) {
-      message.warning({ content: 'Tidak ada data untuk diekspor', key: 'export' })
-      return
-    }
-    downloadXLS(rows, columns, 'HasilProduksi')
-    try {
-      await api.post('/api/audit/event', {
-        action: 'export',
-        module: 'gp',
-        description: 'Export Hasil Produksi GP',
-        metadata: { filename: 'HasilProduksi', rows: rows.length },
-      })
-    } catch (e) {}
-    message.success({ content: `${rows.length} baris berhasil diekspor`, key: 'export' })
-  } catch (e) {
-    message.error({ content: 'Gagal export: ' + (e.message || 'error'), key: 'export' })
-  } finally {
-    setExporting(false)
-  }
+  return exportRowsToXLS({
+    fetchRows: async () => {
+      const res = await api.get(`/api/gp/export`, { params })
+      return res.data.data || []
+    },
+    columns,
+    filename: 'HasilProduksi',
+    sheetName: 'Hasil Produksi',
+    message,
+    setExporting,
+    loadingText: 'Mengambil semua data GP...',
+    auditModule: 'gp',
+    auditDescription: 'Export Hasil Produksi GP',
+  })
 }
 
 // ─── Status helper ────────────────────────────────────────────────────────────
@@ -435,7 +361,7 @@ export default function GP() {
               icon={exporting ? <LoadingOutlined /> : <FileExcelOutlined />}
               onClick={handleExport}
               disabled={exporting}
-              style={{ background: '#217346', borderColor: '#217346' }}
+              style={{ background: '#087ff5', borderColor: '#087ff5' }}
             >
               {exporting ? 'Mengekspor...' : 'Export XLS'}
             </Button>

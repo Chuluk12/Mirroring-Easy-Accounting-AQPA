@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Button, Card, Col, DatePicker, Input, InputNumber, message, Popover, Row, Select, Space,
+  Button, Card, Col, DatePicker, Input, message, Popover, Row, Select, Space,
   Statistic, Table, Tag, Typography,
 } from 'antd'
 import {
   FileExcelOutlined, LineChartOutlined, ReloadOutlined, SearchOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
-import api from '../../api/client'
+import api, { getApiErrorMessage } from '../../api/client'
 import { exportRowsToXLS } from '../../utils/exportXls'
 import { withTableSorters } from '../../utils/tableSorters'
 import { useAuth } from '../../context/AuthContext'
@@ -17,8 +17,30 @@ const { RangePicker } = DatePicker
 const { Search } = Input
 const { Text, Title } = Typography
 const DEFAULT_PAGE_SIZE = 50
+const PROFIT_LOSS_TIMEOUT = 600000
+const EXPORT_POLL_INTERVAL = 2000
+const EXPORT_POLL_TIMEOUT = 30 * 60 * 1000
 
-const currentPeriodRange = () => [dayjs().startOf('month'), dayjs()]
+const defaultProfitLossRange = () => [dayjs().startOf('month'), dayjs()]
+
+const dateParam = date => (date?.isValid?.() ? date.format('YYYY-MM-DD') : '')
+const periodToDateRange = period => {
+  if (!period) return null
+  const from = period.date_from ? dayjs(period.date_from) : null
+  const to = period.date_to ? dayjs(period.date_to) : null
+  return [
+    from?.isValid?.() ? from : null,
+    to?.isValid?.() ? to : null,
+  ]
+}
+const formatPeriod = dates => {
+  const from = dateParam(dates?.[0])
+  const to = dateParam(dates?.[1])
+  if (from && to) return `${dates[0].format('DD/MM/YYYY')} - ${dates[1].format('DD/MM/YYYY')}`
+  if (from) return `Mulai ${dates[0].format('DD/MM/YYYY')}`
+  if (to) return `Sampai ${dates[1].format('DD/MM/YYYY')}`
+  return 'Semua tanggal'
+}
 
 const emptySummary = {
   total_baris: 0,
@@ -45,6 +67,21 @@ const formatQty = value => Number(value || 0).toLocaleString('id-ID', {
   minimumFractionDigits: 0,
   maximumFractionDigits: 4,
 })
+
+const extractProjectReferences = (...values) => {
+  const seen = new Set()
+  const refs = []
+  values.forEach(value => {
+    String(value || '').match(/\bAI-PP-\d+\b/gi)?.forEach(match => {
+      const ref = match.toUpperCase()
+      if (!seen.has(ref)) {
+        seen.add(ref)
+        refs.push(ref)
+      }
+    })
+  })
+  return refs
+}
 
 function FeeReferenceCell({ value, details = [], color, type }) {
   const content = (
@@ -143,6 +180,120 @@ function DeliveryReferenceCell({ value, details = [], color, type, fallbackTitle
   )
 }
 
+function ProjectCostReferenceCell({ value, details = [], record }) {
+  const color = '#d46b08'
+  const [lookupDetails, setLookupDetails] = useState([])
+  const [lookupLoading, setLookupLoading] = useState(false)
+  const label = <Text style={{ color }}>{formatCurrency(value)}</Text>
+  if (!Number(value || 0)) return label
+  const visibleDetails = details.length ? details : lookupDetails
+
+  const lookupProjectReference = async open => {
+    if (!open || details.length || lookupDetails.length || lookupLoading) return
+    const noSo = String(record?.no_so || '').trim().toUpperCase()
+    if (!noSo) return
+
+    setLookupLoading(true)
+    try {
+      const response = await api.get('/api/project', {
+        params: {
+          search: noSo,
+          project_type: 'mkt',
+          status: 'active',
+          offset: 0,
+          limit: 20,
+        },
+      })
+      const matched = (response.data.data || [])
+        .map(project => {
+          const refs = extractProjectReferences(
+            project.no_project,
+            project.nama_project,
+            project.deskripsi,
+            project.remarks,
+          )
+          if (!refs.includes(noSo)) return null
+          const referenceCount = refs.length || 1
+          const realisasi = Number(project.realisasi || 0)
+          return {
+            referensi: noSo,
+            no_project: project.no_project,
+            nama_project: project.nama_project,
+            nama_kontak: project.nama_kontak,
+            realisasi_project: realisasi,
+            jumlah_referensi_project: referenceCount,
+            nilai_referensi: realisasi / referenceCount,
+            basis_alokasi: 'Referensi dari Daftar Project',
+            jumlah_baris: Number(record?.jumlah || 0),
+            total_jumlah_referensi: null,
+            nilai_alokasi: Number(value || 0),
+          }
+        })
+        .filter(Boolean)
+      setLookupDetails(matched)
+    } catch {
+      setLookupDetails([])
+    } finally {
+      setLookupLoading(false)
+    }
+  }
+
+  const content = (
+    <div style={{ width: 460, maxHeight: 360, overflowY: 'auto' }}>
+      {visibleDetails.length ? visibleDetails.map((detail, index) => (
+          <div
+            key={`${detail.no_project || 'project'}-${detail.referensi || 'ref'}-${index}`}
+            style={{ padding: '8px 0', borderBottom: index < visibleDetails.length - 1 ? '1px solid #f0f0f0' : 0 }}
+          >
+            <div>
+              <Text type="secondary">Project: </Text>
+              <Text strong code>{detail.no_project || '-'}</Text>
+            </div>
+            <Space size={6} wrap>
+              <Tag color="orange" style={{ margin: 0 }}>{detail.referensi || '-'}</Tag>
+              <Text type="secondary">{detail.basis_alokasi || '-'}</Text>
+            </Space>
+            <div><Text type="secondary">Nama: </Text><Text>{detail.nama_project || '-'}</Text></div>
+            <div><Text type="secondary">Kontak: </Text><Text>{detail.nama_kontak || '-'}</Text></div>
+            <div>
+              <Text type="secondary">Realisasi project: </Text>
+              <Text>{formatCurrency(detail.realisasi_project)}</Text>
+            </div>
+            <div>
+              <Text type="secondary">Nilai referensi: </Text>
+              <Text>{formatCurrency(detail.nilai_referensi)}</Text>
+              <Text type="secondary"> dari {detail.jumlah_referensi_project || 1} referensi</Text>
+            </div>
+            <div>
+              <Text type="secondary">Jumlah baris: </Text>
+              <Text>{formatCurrency(detail.jumlah_baris)}</Text>
+            </div>
+            <div>
+              <Text type="secondary">Total basis: </Text>
+              <Text>{detail.total_jumlah_referensi === null || detail.total_jumlah_referensi === undefined ? '-' : formatCurrency(detail.total_jumlah_referensi)}</Text>
+            </div>
+            <div>
+              <Text type="secondary">Alokasi baris: </Text>
+              <Text strong>{formatCurrency(detail.nilai_alokasi)}</Text>
+            </div>
+          </div>
+        )) : lookupLoading ? (
+          <Text type="secondary">Mencari referensi project...</Text>
+        ) : (
+          <Text type="secondary">Tidak ditemukan project aktif yang mereferensikan SO ini.</Text>
+        )}
+    </div>
+  )
+
+  return (
+    <Popover title="Rincian Biaya Project" content={content} trigger="click" placement="left" onOpenChange={lookupProjectReference}>
+      <Button type="link" onClick={event => event.stopPropagation()} style={{ height: 'auto', padding: 0 }}>
+        {label}
+      </Button>
+    </Popover>
+  )
+}
+
 const EXPORT_COLUMNS = [
   { key: 'no_faktur', label: 'No. Faktur' },
   { key: 'no_do', label: 'No. Pengiriman' },
@@ -153,72 +304,23 @@ const EXPORT_COLUMNS = [
   { key: 'deskripsi_barang', label: 'Deskripsi Produk' },
   { key: 'qty_faktur', label: 'Kts Faktur', type: 'number' },
   { key: 'uom', label: 'Satuan' },
-  { key: 'harga_satuan', label: 'Harga Satuan', type: 'number' },
-  { key: 'jumlah', label: 'Jumlah', type: 'number' },
-  { key: 'nilai_hpp', label: 'Nilai HPP', type: 'number' },
-  { key: 'gross_profit', label: 'Gross Profit', type: 'number' },
-  { key: 'delivery', label: 'Delivery Purch', type: 'number' },
-  { key: 'delivery_ju', label: 'Delivery JU', type: 'number' },
-  { key: 'cf', label: 'CF', type: 'number' },
-  { key: 'cf_pct', label: 'CF %' },
-  { key: 'mf', label: 'MF', type: 'number' },
-  { key: 'mf_pct', label: 'MF %' },
-  { key: 'biaya_project', label: 'Biaya Project', type: 'number' },
-  { key: 'total_biaya', label: 'Total Biaya', type: 'number' },
-  { key: 'laba_operasi', label: 'Laba Operasi', type: 'number' },
+  { key: 'harga_satuan', label: 'Harga Satuan', type: 'currency' },
+  { key: 'jumlah', label: 'Jumlah', type: 'currency' },
+  { key: 'nilai_hpp', label: 'Nilai HPP', type: 'currency' },
+  { key: 'gross_profit', label: 'Gross Profit', type: 'currency' },
+  { key: 'delivery', label: 'Delivery Purch', type: 'currency' },
+  { key: 'delivery_ju', label: 'Delivery JU', type: 'currency' },
+  { key: 'cf', label: 'CF', type: 'currency' },
+  { key: 'cf_pct', label: 'CF %', type: 'number' },
+  { key: 'mf', label: 'MF', type: 'currency' },
+  { key: 'mf_pct', label: 'MF %', type: 'number' },
+  { key: 'biaya_project', label: 'Biaya Project', type: 'currency' },
+  { key: 'total_biaya', label: 'Total Biaya', type: 'currency' },
+  { key: 'laba_operasi', label: 'Laba Operasi', type: 'currency' },
   { key: 'margin_pct', label: '%', type: 'number' },
   { key: 'nama_pelanggan', label: 'Pelanggan' },
   { key: 'no_po', label: 'No. PO' },
 ]
-
-function EditableManualCost({ record, field, onSaved }) {
-  const [value, setValue] = useState(Number(record[field] || 0))
-  const [saving, setSaving] = useState(false)
-
-  useEffect(() => {
-    setValue(Number(record[field] || 0))
-  }, [record, field])
-
-  const save = async () => {
-    const nextValue = Math.max(Number(value || 0), 0)
-    if (nextValue === Number(record[field] || 0)) return
-    setSaving(true)
-    try {
-      const payload = {
-        row_key: record.manual_cost_key,
-        cf: Number(record.cf || 0),
-        mf: Number(record.mf || 0),
-        biaya_project: Number(record.biaya_project || 0),
-        [field]: nextValue,
-      }
-      await api.post('/api/profit-loss/manual-cost', payload)
-      onSaved(record, field, nextValue)
-      message.success(`${field === 'biaya_project' ? 'Biaya Project' : field.toUpperCase()} tersimpan`)
-    } catch (error) {
-      setValue(Number(record[field] || 0))
-      message.error(error.response?.data?.message || 'Gagal menyimpan biaya manual')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <InputNumber
-      size="small"
-      value={value}
-      min={0}
-      controls={false}
-      disabled={saving}
-      formatter={input => `${input || ''}`.replace(/\B(?=(\d{3})+(?!\d))/g, '.')}
-      parser={input => (input || '').replace(/\./g, '').replace(/,/g, '.')}
-      onClick={event => event.stopPropagation()}
-      onChange={next => setValue(Number(next || 0))}
-      onBlur={save}
-      onPressEnter={event => event.currentTarget.blur()}
-      style={{ width: 125, textAlign: 'right' }}
-    />
-  )
-}
 
 export default function ProfitLoss() {
   const { user } = useAuth()
@@ -229,7 +331,8 @@ export default function ProfitLoss() {
   const [search, setSearch] = useState('')
   const [marketing, setMarketing] = useState('')
   const [marketingOptions, setMarketingOptions] = useState([])
-  const [dateRange, setDateRange] = useState(currentPeriodRange)
+  const [dateRange, setDateRange] = useState(defaultProfitLossRange)
+  const [activeDateRange, setActiveDateRange] = useState(defaultProfitLossRange)
   const [pagination, setPagination] = useState({
     current: 1,
     pageSize: DEFAULT_PAGE_SIZE,
@@ -237,9 +340,9 @@ export default function ProfitLoss() {
   })
   const searchRef = useRef('')
   const marketingRef = useRef('')
-  const dateRangeRef = useRef(currentPeriodRange())
+  const dateRangeRef = useRef(defaultProfitLossRange())
 
-  const fetchData = useCallback(async (page = 1, pageSize = DEFAULT_PAGE_SIZE, searchValue = '', dates = currentPeriodRange(), marketingValue = '') => {
+  const fetchData = useCallback(async (page = 1, pageSize = DEFAULT_PAGE_SIZE, searchValue = '', dates = defaultProfitLossRange(), marketingValue = '') => {
     setLoading(true)
     try {
       const params = {
@@ -248,15 +351,21 @@ export default function ProfitLoss() {
       }
       if (searchValue) params.search = searchValue
       if (marketingValue) params.marketing = marketingValue
-      if (dates?.[0]) params.date_from = dates[0].format('YYYY-MM-DD')
-      if (dates?.[1]) params.date_to = dates[1].format('YYYY-MM-DD')
-      const response = await api.get('/api/profit-loss', { params })
+      if (dateParam(dates?.[0])) params.date_from = dateParam(dates[0])
+      if (dateParam(dates?.[1])) params.date_to = dateParam(dates[1])
+      const response = await api.get('/api/profit-loss', { params, timeout: PROFIT_LOSS_TIMEOUT })
       setData(response.data.data || [])
       setSummary({ ...emptySummary, ...(response.data.summary || {}) })
       setMarketingOptions(response.data.marketing_options || [])
       setPagination({ current: page, pageSize, total: response.data.total || 0 })
+      const effectiveRange = periodToDateRange(response.data.period) || dates || [null, null]
+      setActiveDateRange(effectiveRange)
+      if (!dateParam(dates?.[0]) || !dateParam(dates?.[1])) {
+        dateRangeRef.current = effectiveRange
+        setDateRange(effectiveRange)
+      }
     } catch (error) {
-      message.error(error.response?.data?.message || 'Gagal memuat Profit & Loss')
+      message.error(getApiErrorMessage(error, 'Gagal memuat Profit & Loss'))
     } finally {
       setLoading(false)
     }
@@ -276,9 +385,12 @@ export default function ProfitLoss() {
 
   const handleDate = dates => {
     const nextDates = dates || [null, null]
-    dateRangeRef.current = nextDates
     setDateRange(nextDates)
-    fetchData(1, pagination.pageSize, searchRef.current, nextDates, marketingRef.current)
+  }
+
+  const applyDateFilter = () => {
+    dateRangeRef.current = dateRange
+    fetchData(1, pagination.pageSize, searchRef.current, dateRange, marketingRef.current)
   }
 
   const handleMarketing = value => {
@@ -289,13 +401,14 @@ export default function ProfitLoss() {
   }
 
   const handleReset = () => {
-    const dates = currentPeriodRange()
+    const dates = defaultProfitLossRange()
     searchRef.current = ''
     marketingRef.current = ''
     dateRangeRef.current = dates
     setSearch('')
     setMarketing('')
     setDateRange(dates)
+    setActiveDateRange(dates)
     fetchData(1, DEFAULT_PAGE_SIZE, '', dates, '')
   }
 
@@ -304,10 +417,22 @@ export default function ProfitLoss() {
       const params = {}
       if (searchRef.current) params.search = searchRef.current
       if (marketingRef.current) params.marketing = marketingRef.current
-      if (dateRangeRef.current?.[0]) params.date_from = dateRangeRef.current[0].format('YYYY-MM-DD')
-      if (dateRangeRef.current?.[1]) params.date_to = dateRangeRef.current[1].format('YYYY-MM-DD')
-      const response = await api.get('/api/profit-loss/export', { params, timeout: 300000 })
-      return response.data.data || []
+      if (dateParam(dateRangeRef.current?.[0])) params.date_from = dateParam(dateRangeRef.current[0])
+      if (dateParam(dateRangeRef.current?.[1])) params.date_to = dateParam(dateRangeRef.current[1])
+      const started = await api.post('/api/profit-loss/export/start', params)
+      const jobId = started.data?.job_id
+      if (!jobId) throw new Error('Server tidak memberikan ID proses export')
+
+      const startedAt = Date.now()
+      while (Date.now() - startedAt < EXPORT_POLL_TIMEOUT) {
+        await new Promise(resolve => setTimeout(resolve, EXPORT_POLL_INTERVAL))
+        const response = await api.get(`/api/profit-loss/export/status/${jobId}`)
+        if (response.data?.status === 'completed') return response.data.data || []
+        if (response.data?.status === 'failed') {
+          throw new Error(response.data.error || 'Proses export gagal di server')
+        }
+      }
+      throw new Error('Proses export melewati batas waktu 30 menit')
     },
     columns: filterExportColumnsByPermission('profit_loss', EXPORT_COLUMNS, user),
     filename: 'Profit_Loss_Invoice',
@@ -318,37 +443,6 @@ export default function ProfitLoss() {
     auditModule: 'profit_loss',
     auditDescription: 'Export Profit & Loss Invoice',
   })
-
-  const handleManualCostSaved = (record, field, nextValue) => {
-    const previousValue = Number(record[field] || 0)
-    const delta = nextValue - previousValue
-    const summaryKey = {
-      cf: 'total_cf',
-      mf: 'total_mf',
-      biaya_project: 'total_biaya_project',
-    }[field]
-    setData(current => current.map(row => {
-      if (row.manual_cost_key !== record.manual_cost_key) return row
-      const nextLabaOperasi = Number(row.laba_operasi || 0) - delta
-      return {
-        ...row,
-        [field]: nextValue,
-        total_biaya: Number(row.total_biaya || 0) + delta,
-        laba_operasi: nextLabaOperasi,
-        margin_pct: Number(row.jumlah || 0) ? nextLabaOperasi / Number(row.jumlah) * 100 : 0,
-      }
-    }))
-    setSummary(current => {
-      const nextLabaOperasi = Number(current.laba_operasi || 0) - delta
-      return {
-        ...current,
-        [summaryKey]: Number(current[summaryKey] || 0) + delta,
-        total_biaya: Number(current.total_biaya || 0) + delta,
-        laba_operasi: nextLabaOperasi,
-        margin_pct: Number(current.total_jumlah || 0) ? nextLabaOperasi / Number(current.total_jumlah) * 100 : 0,
-      }
-    })
-  }
 
   const columns = filterColumnsByPermission('profit_loss', withTableSorters([
     { title: 'No. Faktur', dataIndex: 'no_faktur', width: 150, fixed: 'left', render: value => <Text code>{value}</Text> },
@@ -418,7 +512,9 @@ export default function ProfitLoss() {
       dataIndex: 'biaya_project',
       width: 155,
       align: 'right',
-      render: (_, record) => <EditableManualCost record={record} field="biaya_project" onSaved={handleManualCostSaved} />,
+      render: (value, record) => (
+        <ProjectCostReferenceCell value={value} details={record.biaya_project_details} record={record} />
+      ),
     },
     {
       title: 'Total Biaya',
@@ -448,7 +544,10 @@ export default function ProfitLoss() {
   return (
     <div>
       <Title level={3} style={{ marginBottom: 4 }}>Profit & Loss (Laba & Rugi)</Title>
-      <Text type="secondary">Gross Profit dihitung dari Jumlah penjualan dikurangi Nilai HPP jurnal.</Text>
+      <Space size={8} wrap>
+        <Text type="secondary">Gross Profit dihitung dari Jumlah penjualan dikurangi Nilai HPP jurnal.</Text>
+        <Tag color="blue">Periode aktif: {formatPeriod(activeDateRange)}</Tag>
+      </Space>
 
       <Row gutter={[12, 12]} style={{ marginTop: 18, marginBottom: 16 }}>
         <Col xs={12} lg={4}><Card><Statistic title="Total Faktur" value={summary.total_faktur} /></Card></Col>
@@ -475,7 +574,14 @@ export default function ProfitLoss() {
               onSearch={handleSearch}
               style={{ width: 280 }}
             />
-            <RangePicker value={dateRange} onChange={handleDate} format="DD/MM/YYYY" />
+            <RangePicker
+              value={dateRange}
+              onChange={handleDate}
+              format="DD/MM/YYYY"
+              allowClear
+              style={{ width: 245 }}
+            />
+            <Button type="primary" onClick={applyDateFilter} loading={loading}>Terapkan</Button>
             <Select
               allowClear
               showSearch

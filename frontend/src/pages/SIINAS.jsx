@@ -141,14 +141,14 @@ export default function SIINAS() {
 
   const exportBarang = () => exportRowsToXLS({
     rows: barangRows,
-    columns: barangColumns.map(column => ({ key: column.dataIndex, label: column.title })),
-    filename: 'siinas-barang.xls',
+    columns: barangColumns.map(column => ({ key: column.dataIndex, label: column.title, type: column.type })),
+    filename: 'siinas-barang',
   })
 
   const exportValuasi = () => exportRowsToXLS({
     rows: valuasiRows,
     columns: valuasiColumns.map(column => ({ key: column.dataIndex, label: column.title, type: column.type })),
-    filename: 'siinas-valuasi-rinci.xls',
+    filename: 'siinas-valuasi-rinci',
   })
 
   const barangToolbar = (

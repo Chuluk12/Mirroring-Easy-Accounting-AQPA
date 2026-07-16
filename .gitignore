@@ -15,3 +15,9 @@ backend/.env
 *.sqlite
 *.sqlite-*
 *.sqlite.*
+
+# Local exports and hand-off packages
+/exports/
+/login-files-aqpa-package/
+/login-files-aqpa.zip
+/tools/__pycache__/

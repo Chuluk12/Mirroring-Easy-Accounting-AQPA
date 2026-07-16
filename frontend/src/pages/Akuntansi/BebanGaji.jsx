@@ -234,7 +234,7 @@ export default function BebanGaji() {
               }}
             />
             <Button icon={<ReloadOutlined />} onClick={handleReset}>Reset</Button>
-            <Button type="primary" icon={<FileExcelOutlined />} onClick={handleExport} loading={exporting} style={{ background: '#217346', borderColor: '#217346' }}>
+            <Button type="primary" icon={<FileExcelOutlined />} onClick={handleExport} loading={exporting} style={{ background: '#087ff5', borderColor: '#087ff5' }}>
               Export XLS
             </Button>
           </Space>

@@ -2102,6 +2102,8 @@ function SalesmanYearlyPerformancePreview({ rows = [], loading }) {
                   YoY {Number(comparisonTotals.growth_pct || 0)}% | {formatCurrency(comparisonTotals.diff_amount || 0)}
                 </Tag>
                 <Button
+                  type="primary"
+                  className="dashboard-export-button"
                   icon={<FileExcelOutlined />}
                   size="small"
                   onClick={handleExportComparison}
@@ -2804,7 +2806,8 @@ function SalesDailyReport({ dateRange }) {
   const [report, setReport] = useState(dailyReportEmpty)
   const [loading, setLoading] = useState(false)
   const [printReport, setPrintReport] = useState(null)
-  const today = dayjs()
+  const reportDate = dateRange[1]
+  const periodTitle = reportDate.format('DD MMMM YYYY').toUpperCase()
 
   useEffect(() => {
     let ignore = false
@@ -2814,8 +2817,8 @@ function SalesDailyReport({ dateRange }) {
         setLoading(true)
         const res = await api.get('/api/dashboard-sales-daily-report', {
           params: {
-            date_from: today.format('YYYY-MM-DD'),
-            date_to: today.format('YYYY-MM-DD'),
+            date_from: reportDate.format('YYYY-MM-DD'),
+            date_to: reportDate.format('YYYY-MM-DD'),
           },
         })
         if (!ignore) {
@@ -2838,9 +2841,8 @@ function SalesDailyReport({ dateRange }) {
     return () => {
       ignore = true
     }
-  }, [])
+  }, [reportDate])
 
-  const periodTitle = today.format('DD MMMM YYYY').toUpperCase()
   const handlePrint = useCallback(() => {
     setPrintReport(report)
     window.setTimeout(() => window.print(), 100)
@@ -3597,7 +3599,7 @@ function MarketingReceivableOverview({ marketingRows = [], receivableRows = [], 
       extra={(
         <Space wrap>
           <Text type="secondary">Klik sales untuk detail customer</Text>
-          <Button icon={<FileExcelOutlined />} onClick={exportMarketingRisk} disabled={!combinedRows.length}>Export XLS</Button>
+          <Button className="dashboard-export-button" type="primary" icon={<FileExcelOutlined />} onClick={exportMarketingRisk} disabled={!combinedRows.length}>Export XLS</Button>
         </Space>
       )}
       loading={loading}
@@ -4028,7 +4030,7 @@ function MarketingCustomerPerformance({ rows = [], loading }) {
       extra={(
         <Space wrap>
           <Text type="secondary">{previousYear} Jan-Des vs {currentYear} Jan-{currentPeriodLabel}</Text>
-          <Button icon={<FileExcelOutlined />} onClick={exportMarketingCustomer} disabled={!safeRows.length}>Export XLS</Button>
+          <Button className="dashboard-export-button" type="primary" icon={<FileExcelOutlined />} onClick={exportMarketingCustomer} disabled={!safeRows.length}>Export XLS</Button>
         </Space>
       )}
     >
@@ -4330,7 +4332,7 @@ function SalesReceivablesBySalesman({ rows = [], loading }) {
       extra={(
         <Space wrap>
           <Text type="secondary">{formatNumber(totalInvoices)} invoice belum lunas</Text>
-          <Button icon={<FileExcelOutlined />} onClick={exportSalesReceivables} disabled={!safeRows.length}>Export XLS</Button>
+          <Button className="dashboard-export-button" type="primary" icon={<FileExcelOutlined />} onClick={exportSalesReceivables} disabled={!safeRows.length}>Export XLS</Button>
         </Space>
       )}
     >
@@ -4598,7 +4600,7 @@ function DeliveryModule({ sales = {}, loading }) {
   )
 }
 
-function SalesModule({ sales, loading, canViewInvoice = true, dateRange }) {
+function SalesModule({ sales, loading, detailLoading = false, canViewInvoice = true, dateRange }) {
   const targetReached = Number(sales.target_achievement_pct || 0) >= 100
   const [selectedProduct, setSelectedProduct] = useState(null)
   const [productDetails, setProductDetails] = useState({ data: [], summary: {} })
@@ -4827,7 +4829,7 @@ function SalesModule({ sales, loading, canViewInvoice = true, dateRange }) {
         <MarketingReportTabs
           marketingRows={sales.marketing_customer_yearly}
           receivableRows={sales.sales_receivables_by_salesman}
-          loading={loading}
+          loading={loading || detailLoading}
         />
       </Col>
       <Col xs={24}>
@@ -5106,7 +5108,7 @@ function InventoryModule({ stock, loading }) {
       <Col xs={24} sm={12} xl={10} style={{ display: 'flex' }}>
         <SummaryCard
           title="Lewat Minimum"
-          value={stock.below_minimum_items}
+          value={stock.below_minimum_items ?? '-'}
           icon={<WarningOutlined />}
           color={orange}
           loading={loading}
@@ -5560,6 +5562,7 @@ export default function Dashboard() {
   const [dateRange, setDateRange] = useState(defaultDateRange)
   const [hppTrendRange, setHppTrendRange] = useState(defaultDateRange)
   const [loading, setLoading] = useState(true)
+  const [detailLoading, setDetailLoading] = useState(true)
   const [hppTrendLoading, setHppTrendLoading] = useState(true)
   const summaryRequestRef = useRef(0)
   const canViewStock = hasPermission('stock')
@@ -5582,6 +5585,7 @@ export default function Dashboard() {
     summaryRequestRef.current = requestId
     try {
       setLoading(true)
+      setDetailLoading(true)
       const [dateFrom, dateTo] = dateRange
       const params = {
         date_from: dateFrom.format('YYYY-MM-DD'),
@@ -5603,8 +5607,16 @@ export default function Dashboard() {
         .catch(e => {
           console.error(e)
         })
+        .finally(() => {
+          if (summaryRequestRef.current === requestId) {
+            setDetailLoading(false)
+          }
+        })
     } catch (e) {
       console.error(e)
+      if (summaryRequestRef.current === requestId) {
+        setDetailLoading(false)
+      }
     } finally {
       if (summaryRequestRef.current === requestId) {
         setLoading(false)
@@ -5690,7 +5702,7 @@ export default function Dashboard() {
           color={red}
           icon={<ShoppingOutlined />}
         >
-          <SalesModule sales={summary.sales} loading={loading} canViewInvoice={canViewInvoice} dateRange={dateRange} />
+          <SalesModule sales={summary.sales} loading={loading} detailLoading={detailLoading} canViewInvoice={canViewInvoice} dateRange={dateRange} />
         </ModuleSection>
       )}
 

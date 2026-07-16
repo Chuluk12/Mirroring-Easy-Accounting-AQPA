@@ -14,6 +14,13 @@ services:
       - EASY_DB_PATH=${EASY_DB_PATH:-E:/EASY/AQPA.EASY6}
       - EASY_DB_USER=${EASY_DB_USER:-SYSDBA}
       - EASY_DB_PASSWORD=${EASY_DB_PASSWORD:-NewPassword123}
+      - APP_DB_ENGINE=${APP_DB_ENGINE:-sqlite}
+      - APP_DB_HOST=${APP_DB_HOST:-127.0.0.1}
+      - APP_DB_PORT=${APP_DB_PORT:-5432}
+      - APP_DB_NAME=${APP_DB_NAME:-easy_dashboard}
+      - APP_DB_USER=${APP_DB_USER:-postgres}
+      - APP_DB_PASSWORD=${APP_DB_PASSWORD:-}
+      - DRIVER_INTEGRATION_API_KEY=${DRIVER_INTEGRATION_API_KEY:-}
       - EASY_BACKEND_PORT=5000
     volumes:
       - ./backend:/app

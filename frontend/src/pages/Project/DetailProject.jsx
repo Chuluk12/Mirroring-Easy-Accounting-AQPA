@@ -24,7 +24,7 @@ const EXPORT_COLUMNS = [
   { key: 'tipe_transaksi', label: 'Tipe Transaksi' },
   { key: 'no_dokumen', label: 'No Dokumen' },
   { key: 'deskripsi', label: 'Deskripsi' },
-  { key: 'nilai', label: 'Nilai', type: 'number' },
+  { key: 'nilai', label: 'Nilai', type: 'accounting' },
 ]
 
 export default function DetailProject() {

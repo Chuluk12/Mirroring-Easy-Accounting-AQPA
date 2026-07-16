@@ -38,6 +38,7 @@ const ROLE_COLOR = {
   inventory: 'cyan',
   purchasing: 'orange',
   marketing: 'green',
+  marketing_fee: 'cyan',
   akuntansi: 'gold',
   akutansi_staff: 'gold',
   produksi: 'purple',
@@ -168,7 +169,7 @@ export default function MainLayout() {
               <Badge
                 count={todayCount}
                 overflowCount={999}
-                style={{ marginLeft: 4, backgroundColor: '#d41452', fontSize: 10 }}
+                style={{ marginLeft: 4, backgroundColor: '#087ff5', fontSize: 10 }}
               />
             )}
           </span>
@@ -212,6 +213,9 @@ export default function MainLayout() {
       penjualanChildren.push({ key: '/penjualan/penjualan', icon: <ShoppingOutlined />, label: 'Daftar Penjualan' })
       penjualanChildren.push({ key: '/penjualan/kelengkapan-dokumen', icon: <SafetyOutlined />, label: 'Kelengkapan Dokumen' })
     }
+    if (hasPermission('customer_registration_documents')) {
+      penjualanChildren.push({ key: '/penjualan/kelengkapan-registrasi-customer', icon: <SafetyOutlined />, label: 'Kelengkapan Dokumen Registrasi Customer' })
+    }
     if (hasPermission('penjualan_do')) {
       penjualanChildren.push({ key: '/penjualan/modul-pengiriman', icon: <SendOutlined />, label: 'Modul Pengiriman' })
       penjualanChildren.push({ key: '/penjualan/pengiriman', icon: <SendOutlined />, label: 'Daftar Pengiriman' })
@@ -228,12 +232,40 @@ export default function MainLayout() {
     if (hasPermission('salesman')) {
       penjualanChildren.push({ key: '/penjualan/salesman', icon: <UserOutlined />, label: 'Salesman' })
     }
-    if ((hasPermission('penjualan') || hasPermission('penjualan_do') || hasPermission('waktu_pengiriman')) && penjualanChildren.length > 0) {
+    if ((
+      hasPermission('penjualan')
+      || hasPermission('penjualan_so')
+      || hasPermission('penjualan_do')
+      || hasPermission('waktu_pengiriman')
+      || hasPermission('invoice')
+      || hasPermission('customer')
+      || hasPermission('customer_registration_documents')
+      || hasPermission('salesman')
+    ) && penjualanChildren.length > 0) {
       items.push({
         key: 'penjualan-group',
         icon: <ShoppingOutlined />,
         label: 'Penjualan',
         children: penjualanChildren,
+      })
+    }
+
+    if (hasPermission('fee_submission')) {
+      items.push({
+        key: 'fee-submission-group',
+        icon: <DollarOutlined />,
+          label: 'Pengajuan CF & MF',
+          children: [
+            ...(['marketing_fee', 'admin'].includes(user?.role)
+            ? [
+                { key: '/pengajuan-fee/pengajuan-cf', icon: <SendOutlined />, label: 'Pengajuan CF' },
+                { key: '/pengajuan-fee/pengajuan-mf', icon: <SendOutlined />, label: 'Pengajuan MF' },
+              ]
+            : []),
+          ...(!['marketing', 'marketing_fee'].includes(user?.role)
+            ? [{ key: '/pengajuan-fee/persetujuan', icon: <SafetyOutlined />, label: 'Persetujuan' }]
+            : []),
+        ],
       })
     }
 
@@ -303,7 +335,7 @@ export default function MainLayout() {
   }
 
   return (
-    <Layout className={`easy-app-shell${fullscreen ? ' is-fullscreen' : ''}`} style={{ minHeight: '100vh', background: '#f4f7fb' }}>
+    <Layout className={`easy-app-shell${fullscreen ? ' is-fullscreen' : ''}`} style={{ minHeight: '100vh', background: '#f3f7fc' }}>
       <Sider
         collapsible
         collapsed={collapsed}
@@ -315,11 +347,11 @@ export default function MainLayout() {
       >
         <div className="easy-brand">
           {!collapsed && <div className="easy-brand-panel" />}
-          <img src="/logo.png" alt="logo" className="easy-brand-logo" />
+          <img src="/aqpa-indonesia-logo.png" alt="AQPA Indonesia" className="easy-brand-logo" />
           {!collapsed && (
             <div className="easy-brand-copy">
-              <div className="easy-brand-title">Easy Dashboard</div>
-              <div className="easy-brand-subtitle">Accounting Monitor</div>
+              <div className="easy-brand-title">AQPA Indonesia</div>
+              <div className="easy-brand-subtitle">Monitoring System</div>
             </div>
           )}
         </div>
@@ -366,8 +398,8 @@ export default function MainLayout() {
                 <DashboardOutlined />
               </div>
               <div>
-                <div className="easy-header-name">Easy Accounting</div>
-                <div className="easy-header-subtitle">Monitoring System</div>
+                <div className="easy-header-name">AQPA Dashboard</div>
+                <div className="easy-header-subtitle">Integrated Monitoring System</div>
               </div>
             </div>
           </div>
@@ -396,7 +428,7 @@ export default function MainLayout() {
                 <UserOutlined className="easy-user-icon" />
                 <span className="easy-user-name">{user?.name}</span>
                 <Tag color={ROLE_COLOR[user?.role] || 'default'} className="easy-user-role">
-                  {user?.role?.toUpperCase()}
+                  {user?.role === 'marketing_fee' ? 'MARKETING CF/MF' : user?.role?.toUpperCase()}
                 </Tag>
               </span>
             </Dropdown>

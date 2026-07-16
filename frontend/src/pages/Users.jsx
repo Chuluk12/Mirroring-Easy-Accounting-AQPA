@@ -23,7 +23,9 @@ const MODULE_META = {
   penjualan_do:  { label: 'Daftar Pengiriman',    color: 'cyan' },
   invoice:       { label: 'Daftar Invoice',       color: 'volcano' },
   customer:      { label: 'Customer',             color: 'green' },
+  customer_registration_documents: { label: 'Kelengkapan Dokumen Registrasi Customer', color: 'green' },
   salesman:      { label: 'Salesman',             color: 'geekblue' },
+  fee_submission:{ label: 'Pengajuan CF & MF',    color: 'gold' },
   pembelian:     { label: 'Daftar Pembelian',    color: 'orange' },
   permintaan:    { label: 'Daftar Permintaan',   color: 'cyan' },
   penerimaan:    { label: 'Daftar Penerimaan',   color: 'blue' },
@@ -51,6 +53,7 @@ const ROLE_COLOR = {
   inventory: 'blue',
   purchasing: 'orange',
   marketing: 'green',
+  marketing_fee: 'cyan',
   akuntansi: 'gold',
   akutansi_staff: 'gold',
   produksi: 'purple',
@@ -58,9 +61,11 @@ const ROLE_COLOR = {
 }
 
 const roleColor = (role) => ROLE_COLOR[role] || 'default'
+const roleLabel = (role) => role === 'marketing_fee' ? 'MARKETING CF/MF' : String(role || '').toUpperCase()
 
 export default function Users() {
   const [users, setUsers] = useState([])
+  const [salesmen, setSalesmen] = useState([])
   const [roles, setRoles] = useState({})
   const [availableColumns, setAvailableColumns] = useState({})
   const [columnParents, setColumnParents] = useState({})
@@ -104,15 +109,29 @@ export default function Users() {
     }
   }
 
+  const fetchSalesmen = async () => {
+    try {
+      const res = await api.get('/api/salesman', { params: { limit: 1000, suspended: 'no' } })
+      setSalesmen(res.data?.data || [])
+    } catch {
+      setSalesmen([])
+    }
+  }
+
   useEffect(() => {
     fetchUsers()
     fetchRoles()
+    fetchSalesmen()
   }, [])
 
   const handleAdd = async (values) => {
     setSaving(true)
     try {
-      const res = await api.post('/api/users', values)
+      const salesman = salesmen.find(item => item.salesman_id === values.salesman_id)
+      const res = await api.post('/api/users', {
+        ...values,
+        salesman_name: salesman?.nama_lengkap || '',
+      })
       message.success(res.data.message)
       setModalOpen(false)
       form.resetFields()
@@ -122,6 +141,20 @@ export default function Users() {
       message.error(e.response?.data?.message || 'Gagal menambah user')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleSalesmanChange = async (user, salesmanId) => {
+    const salesman = salesmen.find(item => item.salesman_id === salesmanId)
+    try {
+      await api.put(`/api/users/${user.id}/salesman`, {
+        salesman_id: salesmanId ?? null,
+        salesman_name: salesman?.nama_lengkap || '',
+      })
+      message.success('Salesman user berhasil disimpan')
+      fetchUsers()
+    } catch (error) {
+      message.error(error.response?.data?.message || 'Gagal menyimpan salesman user')
     }
   }
 
@@ -233,9 +266,26 @@ export default function Users() {
       key: 'role',
       render: val => (
         <Tag color={roleColor(val)} icon={<SafetyOutlined />}>
-          {val?.toUpperCase()}
+          {roleLabel(val)}
         </Tag>
       ),
+    },
+    {
+      title: 'Salesman Login',
+      dataIndex: 'salesman_id',
+      width: 220,
+      render: (value, record) => ['marketing', 'marketing_fee'].includes(record.role) ? (
+        <Select
+          allowClear
+          showSearch
+          value={value || undefined}
+          placeholder="Hubungkan salesman"
+          optionFilterProp="label"
+          style={{ width: '100%' }}
+          options={salesmen.map(item => ({ value: item.salesman_id, label: item.nama_lengkap }))}
+          onChange={next => handleSalesmanChange(record, next)}
+        />
+      ) : <Text type="secondary">-</Text>,
     },
     {
       title: 'Akses Modul',
@@ -291,7 +341,7 @@ export default function Users() {
             <Card size="small">
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
                 <Tag color={roleColor(role)} style={{ fontWeight: 'bold' }}>
-                  {role.toUpperCase()}
+                  {roleLabel(role)}
                 </Tag>
                 <Badge
                   count={users.filter(u => u.role === role).length}
@@ -395,12 +445,23 @@ export default function Users() {
             <Select placeholder="Pilih role user" onChange={val => setPreviewRole(val)} showSearch>
               {Object.keys(roles).map(role => (
                 <Option key={role} value={role}>
-                  <Tag color={roleColor(role)}>{role.toUpperCase()}</Tag>
+                  <Tag color={roleColor(role)}>{roleLabel(role)}</Tag>
                   {role === 'admin' ? 'Akses penuh' : `${roles[role]?.length || 0} modul`}
                 </Option>
               ))}
             </Select>
           </Form.Item>
+
+          {['marketing', 'marketing_fee'].includes(previewRole) && (
+            <Form.Item name="salesman_id" label="Salesman Login" rules={[{ required: true, message: 'Pilih salesman!' }]}>
+              <Select
+                showSearch
+                placeholder="Pilih nama salesman di Easy"
+                optionFilterProp="label"
+                options={salesmen.map(item => ({ value: item.salesman_id, label: item.nama_lengkap }))}
+              />
+            </Form.Item>
+          )}
 
           {previewRole && (
             <>
