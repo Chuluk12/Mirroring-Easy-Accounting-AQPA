@@ -12,7 +12,7 @@ export default defineConfig(({ mode }) => {
       host: '0.0.0.0',
       port: devPort,
       strictPort: false,
-      allowedHosts: ['easy-mirror.aqpa-indonesia.com'],
+      allowedHosts: ['easy-mirror.aqpa-indonesia.com','akurasi.aqpa-indonesia.com'],
     },
     preview: {
       host: '0.0.0.0',
