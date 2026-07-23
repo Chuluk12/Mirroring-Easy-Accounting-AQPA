@@ -32,6 +32,7 @@ from auth import (
     create_fee_submission_batch,
     update_user_salesman
 )
+from integration import create_integration_blueprint
 import fdb
 import hmac
 import os
@@ -104,6 +105,7 @@ DB_CONFIG = {
 
 
 BACKEND_PORT = int(os.getenv("EASY_BACKEND_PORT", "5000"))
+INTEGRATION_API_KEY = os.getenv("EASY_INTEGRATION_API_KEY", "")
 
 MODULE_COLUMNS = {
     "stock": [
@@ -8884,28 +8886,22 @@ def api_penjualan_flow_summary():
         }), 500
 
 
-@app.route("/api/penjualan-so")
-@jwt_required()
-def api_penjualan_so():
-    """Endpoint utama SO dengan pagination."""
-    if not check_permission("penjualan_so"):
-        return jsonify({"message": "Akses ditolak"}), 403
+def _get_penjualan_so_data():
+    search = request.args.get("search", "")
+    date_from = request.args.get("date_from", "")
+    date_to = request.args.get("date_to", "")
+    status = request.args.get("status", "")
+    offset = int(request.args.get("offset", 0))
+    limit = int(request.args.get("limit", 50))
+    if offset < 0 or not 1 <= limit <= 1000:
+        raise ValueError("offset minimal 0 dan limit harus antara 1-1000")
+
+    con = fdb.connect(**DB_CONFIG)
     try:
-        search    = request.args.get("search", "")
-        date_from = request.args.get("date_from", "")
-        date_to   = request.args.get("date_to", "")
-        status    = request.args.get("status", "")   # open|process|received
-        offset    = int(request.args.get("offset", 0))
-        limit     = int(request.args.get("limit", 50))
-
-        con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
-
         line_closed_expr = _so_line_closed_expr(cur)
         where_sql, params_where = _so_where_clause(search, date_from, date_to, status, line_closed_expr)
         so_select = _so_select_sql(line_closed_expr)
-
-        # Data rows
         sql = f"""
             SELECT FIRST ? SKIP ?
                 {so_select}
@@ -8915,8 +8911,6 @@ def api_penjualan_so():
         """
         cur.execute(sql, [limit, offset] + params_where)
         rows = cur.fetchall()
-
-        # Total count (header SO, bukan baris)
         sql_count = f"""
             SELECT
                 COUNT(*),
@@ -8930,640 +8924,33 @@ def api_penjualan_so():
         total_so = int(count_row[1] or 0)
 
         delivery_map = _get_so_delivery_map(cur, rows)
-        con.close()
         data = _build_so_rows(rows, delivery_map)
-        total_amount = sum(row.get("amount", 0) for row in data)
-
-        return jsonify({
-            "data": filter_record_columns("penjualan_so", data),
+        return {
+            "data": data,
             "total_rows": total_rows,
             "total_so": total_so,
-            "total_amount": total_amount,
-        })
+            "total_amount": sum(row.get("amount", 0) for row in data),
+        }
+    finally:
+        con.close()
 
+
+@app.route("/api/penjualan-so")
+@jwt_required()
+def api_penjualan_so():
+    """Endpoint utama SO dengan pagination."""
+    if not check_permission("penjualan_so"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        result = _get_penjualan_so_data()
+        result["data"] = filter_record_columns("penjualan_so", result["data"])
+        return jsonify(result)
     except Exception as e:
         print(f"Error api_penjualan_so: {e}")
         return jsonify({"data": [], "total_rows": 0, "total_so": 0, "error": str(e)})
 
 
-
-@app.route("/api/integration/projects")
-def api_integration_projects():
-    """Read-only active MKT project list untuk integrasi Dinas Luar."""
-    authorization = str(request.headers.get("Authorization", "") or "")
-    provided_key = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-    if not DRIVER_INTEGRATION_API_KEY:
-        return jsonify({"message": "Integration API belum dikonfigurasi"}), 503
-    if not provided_key or not hmac.compare_digest(provided_key, DRIVER_INTEGRATION_API_KEY):
-        return jsonify({"message": "Integration API key tidak valid"}), 401
-    try:
-        con = fdb.connect(**DB_CONFIG)
-        try:
-            cur = con.cursor()
-            where_sql, params = _project_where("", "active", "mkt")
-            cur.execute(f"""
-                SELECT FIRST 1000 p.PROJECTID, p.PROJECTNO, p.PROJECTNAME, p.DESCRIPTION
-                FROM PROJECT p
-                WHERE {where_sql}
-                ORDER BY p.PROJECTNO
-            """, params)
-            data = [{
-                "project_id": int(row[0] or 0),
-                "no_project": str(row[1] or "").strip(),
-                "nama_project": str(row[2] or "").strip(),
-                "deskripsi": str(row[3] or "").strip(),
-            } for row in cur.fetchall()]
-        finally:
-            con.close()
-        return jsonify({"data": data, "total": len(data)})
-    except Exception as e:
-        print(f"Error api_integration_projects: {e}")
-        return jsonify({"data": [], "total": 0, "error": str(e)}), 500
-
-
-@app.route("/api/integration/salesmen")
-def api_integration_salesmen():
-    """Read-only salesman aktif untuk integrasi Master Data Dinas Luar."""
-    authorization = str(request.headers.get("Authorization", "") or "")
-    provided_key = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-    if not DRIVER_INTEGRATION_API_KEY:
-        return jsonify({"message": "Integration API belum dikonfigurasi"}), 503
-    if not provided_key or not hmac.compare_digest(provided_key, DRIVER_INTEGRATION_API_KEY):
-        return jsonify({"message": "Integration API key tidak valid"}), 401
-    try:
-        data = get_salesman_data(limit=1000, suspended="no")
-        return jsonify({"data": data, "total": len(data)})
-    except Exception as e:
-        print(f"Error api_integration_salesmen: {e}")
-        return jsonify({"data": [], "total": 0, "error": str(e)}), 500
-
-
-@app.route("/api/integration/dinas-luar-sales-orders")
-def api_integration_dinas_luar_sales_orders():
-    """Feed header SO yang ringan; detail barang dimuat setelah SO dipilih."""
-    authorization = str(request.headers.get("Authorization", "") or "")
-    provided_key = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-
-    if not DRIVER_INTEGRATION_API_KEY:
-        return jsonify({"message": "Integration API belum dikonfigurasi"}), 503
-    if not provided_key or not hmac.compare_digest(provided_key, DRIVER_INTEGRATION_API_KEY):
-        return jsonify({"message": "Integration API key tidak valid"}), 401
-
-    try:
-        limit = min(max(int(request.args.get("limit", 500)), 1), 1000)
-
-        con = fdb.connect(**DB_CONFIG)
-        try:
-            cur = con.cursor()
-            cur.execute("""
-                SELECT FIRST ?
-                    so.SONO,
-                    so.SODATE,
-                    so.DESCRIPTION,
-                    pd.PERSONNO,
-                    pd.NAME,
-                    COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, ''),
-                    so.SHIPTO1,
-                    so.CLOSED,
-                    (SELECT COUNT(*) FROM SODET det WHERE det.SOID = so.SOID AND det.ITEMNO IS NOT NULL)
-                FROM SO so
-                LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
-                LEFT JOIN SALESMAN sm ON sm.SALESMANID = so.SALESMANID
-                WHERE EXISTS (SELECT 1 FROM SODET det WHERE det.SOID = so.SOID AND det.ITEMNO IS NOT NULL)
-                ORDER BY so.SODATE DESC, so.SONO DESC
-            """, [limit])
-            rows = cur.fetchall()
-        finally:
-            con.close()
-
-        data = [{
-            "no_transaksi": str(row[0] or "").strip(),
-            "tanggal": str(row[1]) if row[1] else "",
-            "nama_project": str(row[2] or "").strip() or str(row[0] or "").strip(),
-            "customer_no": str(row[3] or "").strip(),
-            "customer_name": str(row[4] or "").strip(),
-            "marketing": str(row[5] or "").strip(),
-            "lokasi": str(row[6] or "").strip(),
-            "status": "Selesai" if int(row[7] or 0) else "Aktif",
-            "item_count": int(row[8] or 0),
-        } for row in rows]
-        return jsonify({"data": data, "total": len(data)})
-    except Exception as e:
-        print(f"Error api_integration_sales_orders: {e}")
-        return jsonify({"data": [], "total": 0, "error": str(e)}), 500
-
-
-@app.route("/api/integration/dinas-luar-sales-orders/<path:so_number>")
-def api_integration_dinas_luar_sales_order_detail(so_number):
-    """Detail barang dan nominal untuk satu SO terpilih."""
-    authorization = str(request.headers.get("Authorization", "") or "")
-    provided_key = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-    if not DRIVER_INTEGRATION_API_KEY:
-        return jsonify({"message": "Integration API belum dikonfigurasi"}), 503
-    if not provided_key or not hmac.compare_digest(provided_key, DRIVER_INTEGRATION_API_KEY):
-        return jsonify({"message": "Integration API key tidak valid"}), 401
-    try:
-        con = fdb.connect(**DB_CONFIG)
-        try:
-            cur = con.cursor()
-            cur.execute("""
-                SELECT
-                    so.SONO, so.SODATE, so.DESCRIPTION, pd.PERSONNO, pd.NAME,
-                    COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, ''), so.SHIPTO1,
-                    det.ITEMNO, COALESCE(NULLIF(TRIM(det.ITEMOVDESC), ''), i.ITEMDESCRIPTION),
-                    det.QUANTITY, det.ITEMUNIT, det.UNITPRICE, det.DISCPC,
-                    so.CASHDISCOUNT, so.CASHDISCPC
-                FROM SO so
-                LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
-                LEFT JOIN SALESMAN sm ON sm.SALESMANID = so.SALESMANID
-                JOIN SODET det ON det.SOID = so.SOID
-                LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
-                WHERE so.SONO = ? AND det.ITEMNO IS NOT NULL
-                ORDER BY det.SEQ
-            """, [so_number])
-            rows = cur.fetchall()
-        finally:
-            con.close()
-        if not rows:
-            return jsonify({"message": "Sales Order tidak ditemukan"}), 404
-        line_subtotals = [float(row[9] or 0) * float(row[11] or 0) * (1 - float(row[12] or 0) / 100) for row in rows]
-        gross_total = sum(line_subtotals)
-        cash_discount = float(rows[0][13] or 0)
-        cash_disc_pc = float(rows[0][14] or 0)
-        header_discount = cash_discount if cash_discount else gross_total * cash_disc_pc / 100
-        net_ratio = max(1 - (header_discount / gross_total), 0) if gross_total else 1
-        first = rows[0]
-        data = {
-            "no_transaksi": str(first[0] or "").strip(),
-            "tanggal": str(first[1]) if first[1] else "",
-            "nama_project": str(first[2] or "").strip() or str(first[0] or "").strip(),
-            "customer_no": str(first[3] or "").strip(),
-            "customer_name": str(first[4] or "").strip(),
-            "marketing": str(first[5] or "").strip(),
-            "lokasi": str(first[6] or "").strip(),
-            "items": [{
-                "item_no": str(row[7] or "").strip(),
-                "item_name": str(row[8] or "").strip() or str(row[7] or "").strip(),
-                "qty": float(row[9] or 0),
-                "unit": str(row[10] or "").strip(),
-                "unit_price": float(row[11] or 0),
-                "amount": round(line_subtotals[index] * net_ratio, 2),
-            } for index, row in enumerate(rows)],
-        }
-        return jsonify({"data": data})
-    except Exception as e:
-        print(f"Error api_integration_sales_order_detail: {e}")
-        return jsonify({"message": str(e)}), 500
-
-
-@app.route("/api/integration/purchases")
-def api_integration_purchases():
-    """Read-only Purchase Order feed untuk backend Driver App."""
-    authorization = str(request.headers.get("Authorization", "") or "")
-    provided_key = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-
-    if not DRIVER_INTEGRATION_API_KEY:
-        return jsonify({"message": "Integration API belum dikonfigurasi"}), 503
-    if not provided_key or not hmac.compare_digest(provided_key, DRIVER_INTEGRATION_API_KEY):
-        return jsonify({"message": "Integration API key tidak valid"}), 401
-
-    try:
-        search = request.args.get("search", "")
-        date_from = request.args.get("date_from", "")
-        date_to = request.args.get("date_to", "")
-        offset = max(int(request.args.get("offset", 0)), 0)
-        limit = min(max(int(request.args.get("limit", 50)), 1), 5000)
-
-        conditions = ["1=1"]
-        params_where = []
-        if search:
-            conditions.append("""(
-                LOWER(po.PONO) CONTAINING LOWER(?)
-                OR LOWER(pd.NAME) CONTAINING LOWER(?)
-                OR LOWER(det.ITEMNO) CONTAINING LOWER(?)
-                OR LOWER(det.ITEMOVDESC) CONTAINING LOWER(?)
-                OR LOWER(rq.REQNO) CONTAINING LOWER(?)
-            )""")
-            params_where += [search, search, search, search, search]
-        if date_from:
-            conditions.append("po.PODATE >= ?")
-            params_where.append(date_from)
-        if date_to:
-            conditions.append("po.PODATE <= ?")
-            params_where.append(date_to)
-        where_sql = " AND ".join(conditions)
-
-        con = fdb.connect(**DB_CONFIG)
-        try:
-            cur = con.cursor()
-            cur.execute(f"""
-                SELECT FIRST ? SKIP ?
-                    po.POID,
-                    po.PONO,
-                    po.PODATE,
-                    po.EXPECTED,
-                    pd.PERSONNO,
-                    pd.NAME,
-                    po.DESCRIPTION,
-                    det.SEQ,
-                    det.ITEMNO,
-                    det.ITEMOVDESC,
-                    det.QUANTITY,
-                    det.ITEMUNIT,
-                    rq.REQNO,
-                    rq.REQDATE
-                FROM PO po
-                LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
-                LEFT JOIN PODET det ON det.POID = po.POID
-                LEFT JOIN REQUISITION rq ON rq.REQID = det.REQID
-                WHERE {where_sql}
-                ORDER BY po.PODATE DESC, po.PONO, det.SEQ
-            """, [limit, offset] + params_where)
-            rows = cur.fetchall()
-
-            cur.execute(f"""
-                SELECT COUNT(*), COUNT(DISTINCT po.POID)
-                FROM PO po
-                LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
-                LEFT JOIN PODET det ON det.POID = po.POID
-                LEFT JOIN REQUISITION rq ON rq.REQID = det.REQID
-                WHERE {where_sql}
-            """, params_where)
-            count_row = cur.fetchone()
-        finally:
-            con.close()
-
-        data = []
-        for row in rows:
-            data.append({
-                "_source_purchase_id": int(row[0] or 0),
-                "_source_line_seq": int(row[7] or 0),
-                "no_pembelian": str(row[1] or "").strip(),
-                "tgl_pembelian": str(row[2]) if row[2] else "",
-                "tgl_ekspetasi": str(row[3]) if row[3] else "",
-                "no_pemasok": str(row[4] or "").strip(),
-                "nama_pemasok": str(row[5] or "").strip(),
-                "deskripsi": str(row[6] or "").strip(),
-                "no_barang": str(row[8] or "").strip(),
-                "deskripsi_barang": str(row[9] or "").strip(),
-                "qty": float(row[10] or 0),
-                "uom": str(row[11] or "").strip(),
-                "no_permintaan": str(row[12] or "").strip(),
-                "tgl_permintaan": str(row[13]) if row[13] else "",
-            })
-        return jsonify({
-            "data": data,
-            "total_rows": int(count_row[0] or 0),
-            "total_po": int(count_row[1] or 0),
-        })
-    except Exception as e:
-        print(f"Error api_integration_purchases: {e}")
-        return jsonify({"data": [], "total_rows": 0, "total_po": 0, "error": str(e)}), 500
-
-@app.route("/api/integration/sales-orders")
-def api_integration_sales_orders():
-    """Read-only Sales Order feed untuk backend Driver App."""
-    authorization = str(request.headers.get("Authorization", "") or "")
-    provided_key = authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
-
-    if not DRIVER_INTEGRATION_API_KEY:
-        return jsonify({"message": "Integration API belum dikonfigurasi"}), 503
-    if not provided_key or not hmac.compare_digest(provided_key, DRIVER_INTEGRATION_API_KEY):
-        return jsonify({"message": "Integration API key tidak valid"}), 401
-
-    try:
-        search = request.args.get("search", "")
-        date_from = request.args.get("date_from", "")
-        date_to = request.args.get("date_to", "")
-        status = request.args.get("status", "")
-        offset = max(int(request.args.get("offset", 0)), 0)
-        limit = min(max(int(request.args.get("limit", 50)), 1), 5000)
-
-        con = fdb.connect(**DB_CONFIG)
-        try:
-            cur = con.cursor()
-            line_closed_expr = _so_line_closed_expr(cur)
-            where_sql, params_where = _so_where_clause(
-                search, date_from, date_to, status, line_closed_expr
-            )
-            so_select = _so_select_sql(line_closed_expr)
-            cur.execute(f"""
-                SELECT FIRST ? SKIP ?
-                    {so_select},
-                    det.SEQ AS INTEGRATION_LINE_SEQ
-                {_SO_FROM}
-                WHERE {where_sql}
-                ORDER BY so.SODATE DESC, so.SONO, det.SEQ
-            """, [limit, offset] + params_where)
-            rows = cur.fetchall()
-
-            cur.execute(f"""
-                SELECT COUNT(*), COUNT(DISTINCT so.SOID)
-                {_SO_FROM}
-                WHERE {where_sql}
-            """, params_where)
-            count_row = cur.fetchone()
-            delivery_map = _get_so_delivery_map(cur, rows)
-        finally:
-            con.close()
-
-        data = _build_so_rows(rows, delivery_map)
-        for record, row in zip(data, rows):
-            record["_source_so_id"] = int(row[27] or 0)
-            record["_source_line_seq"] = int(row[29] or 0)
-        return jsonify({
-            "data": data,
-            "total_rows": int(count_row[0] or 0),
-            "total_so": int(count_row[1] or 0),
-            "total_amount": sum(row.get("amount", 0) for row in data),
-        })
-    except Exception as e:
-        print(f"Error api_integration_sales_orders: {e}")
-        return jsonify({
-            "data": [], "total_rows": 0, "total_so": 0, "error": str(e)
-        }), 500
-
-
-SALES_DOCUMENT_TYPES = [
-    {"key": "do_origin", "label": "DO Origin", "department": "LOG"},
-    {"key": "po", "label": "PO", "department": "MKT"},
-    {"key": "faktur_pajak", "label": "Faktur Pajak", "department": "ACC"},
-    {"key": "invoice", "label": "Invoice", "department": "ACC"},
-]
-SALES_DOCUMENT_KEYS = {item["key"] for item in SALES_DOCUMENT_TYPES}
-
-
-def _sales_document_status(documents):
-    required_count = sum(1 for doc in documents.values() if doc["required"])
-    completed_count = sum(
-        1 for doc in documents.values()
-        if doc["required"] and doc["completed"]
-    )
-    if required_count == 0:
-        status = "unconfigured"
-    elif completed_count == required_count:
-        status = "complete"
-    else:
-        status = "incomplete"
-    return {
-        "status": status,
-        "required_count": required_count,
-        "completed_count": completed_count,
-        "progress_pct": round(completed_count / required_count * 100) if required_count else 0,
-    }
-
-
-@app.route("/api/sales-document-completeness")
-@jwt_required()
-def api_sales_document_completeness():
-    if not check_permission("penjualan_so"):
-        return jsonify({"message": "Akses ditolak"}), 403
-    try:
-        search = str(request.args.get("search", "") or "").strip()
-        date_from = str(request.args.get("date_from", "") or "").strip()
-        date_to = str(request.args.get("date_to", "") or "").strip()
-        status_filter = str(request.args.get("status", "") or "").strip().lower()
-        offset = max(int(request.args.get("offset", 0)), 0)
-        limit = min(max(int(request.args.get("limit", 50)), 1), 200)
-
-        conditions = ["UPPER(TRIM(COALESCE(so.SONO, ''))) STARTING WITH 'AI-PP-'"]
-        params = []
-        if search:
-            conditions.append("""(
-                LOWER(so.SONO) CONTAINING LOWER(?)
-                OR LOWER(COALESCE(pd.NAME, '')) CONTAINING LOWER(?)
-                OR LOWER(COALESCE(so.PONO, '')) CONTAINING LOWER(?)
-                OR LOWER(COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, '')) CONTAINING LOWER(?)
-            )""")
-            params += [search, search, search, search]
-        if date_from:
-            conditions.append("so.SODATE >= ?")
-            params.append(date_from)
-        if date_to:
-            conditions.append("so.SODATE <= ?")
-            params.append(date_to)
-
-        con = fdb.connect(**DB_CONFIG)
-        cur = con.cursor()
-        cur.execute(f"""
-            SELECT
-                so.SONO,
-                so.SODATE,
-                COALESCE(pd.PERSONNO, ''),
-                COALESCE(pd.NAME, ''),
-                COALESCE(so.PONO, ''),
-                COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, '')
-            FROM SO so
-            LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
-            LEFT JOIN SALESMAN sm ON sm.SALESMANID = so.SALESMANID
-            WHERE {" AND ".join(conditions)}
-            ORDER BY so.SODATE DESC, so.SONO DESC
-        """, params)
-        source_rows = cur.fetchall()
-        con.close()
-
-        checklist_map = get_sales_document_checklists([row[0] for row in source_rows])
-        all_data = []
-        for row in source_rows:
-            so_no = str(row[0] or "").strip()
-            saved_documents = checklist_map.get(so_no, {})
-            documents = {}
-            for document in SALES_DOCUMENT_TYPES:
-                saved = saved_documents.get(document["key"], {})
-                documents[document["key"]] = {
-                    **document,
-                    "required": bool(saved.get("required", True)),
-                    "completed": bool(saved.get("completed", False)),
-                    "updated_by": saved.get("updated_by", ""),
-                    "updated_at": saved.get("updated_at", ""),
-                    "validated_by": saved.get("validated_by", ""),
-                    "validated_at": saved.get("validated_at", ""),
-                    "is_custom": False,
-                }
-            custom_documents = []
-            for document_key, saved in saved_documents.items():
-                if not saved.get("is_custom"):
-                    continue
-                custom_document = {
-                    "key": document_key,
-                    "label": saved.get("label") or "Dokumen Tambahan",
-                    "department": saved.get("department") or "LAINNYA",
-                    "required": bool(saved.get("required", False)),
-                    "completed": bool(saved.get("completed", False)),
-                    "updated_by": saved.get("updated_by", ""),
-                    "updated_at": saved.get("updated_at", ""),
-                    "validated_by": saved.get("validated_by", ""),
-                    "validated_at": saved.get("validated_at", ""),
-                    "is_custom": True,
-                }
-                documents[document_key] = custom_document
-                custom_documents.append(custom_document)
-            progress = _sales_document_status(documents)
-            item = {
-                "so_no": so_no,
-                "tgl_so": str(row[1]) if row[1] else "",
-                "no_pelanggan": str(row[2] or "").strip(),
-                "nama_pelanggan": str(row[3] or "").strip(),
-                "no_po_customer": str(row[4] or "").strip(),
-                "salesman": str(row[5] or "").strip(),
-                "documents": documents,
-                "custom_documents": custom_documents,
-                **progress,
-            }
-            all_data.append(item)
-
-        summary = {
-            "total": len(all_data),
-            "complete": sum(1 for row in all_data if row["status"] == "complete"),
-            "incomplete": sum(1 for row in all_data if row["status"] == "incomplete"),
-            "unconfigured": sum(1 for row in all_data if row["status"] == "unconfigured"),
-        }
-        data = [
-            row for row in all_data
-            if not status_filter or row["status"] == status_filter
-        ]
-        return jsonify({
-            "data": data[offset:offset + limit],
-            "total": len(data),
-            "summary": summary,
-            "document_types": SALES_DOCUMENT_TYPES,
-        })
-    except Exception as e:
-        print(f"Error api_sales_document_completeness: {e}")
-        return jsonify({"data": [], "total": 0, "error": str(e)}), 500
-
-
-@app.route("/api/sales-document-completeness/checklist", methods=["POST"])
-@jwt_required()
-def api_sales_document_completeness_save():
-    if not check_permission("penjualan_so"):
-        return jsonify({"message": "Akses ditolak"}), 403
-    user = get_current_user()
-    if user.get("role") not in ("admin", "marketing"):
-        return jsonify({"message": "Checklist hanya dapat dikelola oleh MKT."}), 403
-    try:
-        payload = request.get_json(silent=True) or {}
-        so_no = str(payload.get("so_no") or "").strip()
-        document_key = str(payload.get("document_key") or "").strip().lower()
-        saved_documents = get_sales_document_checklists([so_no]).get(so_no, {})
-        is_saved_custom = bool(saved_documents.get(document_key, {}).get("is_custom"))
-        if not so_no or (document_key not in SALES_DOCUMENT_KEYS and not is_saved_custom):
-            return jsonify({"message": "SO atau jenis dokumen tidak valid."}), 400
-
-        con = fdb.connect(**DB_CONFIG)
-        cur = con.cursor()
-        cur.execute("""
-            SELECT FIRST 1 so.SONO
-            FROM SO so
-            WHERE UPPER(TRIM(so.SONO)) = UPPER(TRIM(?))
-              AND UPPER(TRIM(so.SONO)) STARTING WITH 'AI-PP-'
-        """, [so_no])
-        valid_so = cur.fetchone()
-        con.close()
-        if not valid_so:
-            return jsonify({"message": "Sales Order tidak ditemukan di Easy Accounting."}), 404
-
-        saved = save_sales_document_checklist(
-            so_no=so_no,
-            document_key=document_key,
-            is_required=bool(payload.get("required")),
-            is_completed=bool(payload.get("completed")),
-            updated_by=user.get("username"),
-            document_label=saved_documents.get(document_key, {}).get("label", ""),
-            department=saved_documents.get(document_key, {}).get("department", ""),
-            is_custom=is_saved_custom,
-        )
-        audit_current_user(
-            "sales_document_checklist_update",
-            "penjualan_so",
-            f"Update kelengkapan dokumen {so_no} / {document_key}",
-            saved,
-        )
-        return jsonify({"message": "Checklist dokumen disimpan.", "data": saved})
-    except Exception as e:
-        print(f"Error api_sales_document_completeness_save: {e}")
-        return jsonify({"message": "Gagal menyimpan checklist.", "error": str(e)}), 500
-
-
-@app.route("/api/sales-document-completeness/custom-document", methods=["POST"])
-@jwt_required()
-def api_sales_custom_document_create():
-    if not check_permission("penjualan_so"):
-        return jsonify({"message": "Akses ditolak"}), 403
-    user = get_current_user()
-    if user.get("role") not in ("admin", "marketing"):
-        return jsonify({"message": "Dokumen tambahan hanya dapat dibuat oleh MKT."}), 403
-    try:
-        payload = request.get_json(silent=True) or {}
-        so_no = str(payload.get("so_no") or "").strip()
-        label = str(payload.get("label") or "").strip()
-        department = str(payload.get("department") or "").strip().upper()
-        if not so_no or not label or not department:
-            return jsonify({"message": "SO, nama dokumen, dan departemen wajib diisi."}), 400
-        if len(label) > 100 or len(department) > 20:
-            return jsonify({"message": "Nama dokumen atau departemen terlalu panjang."}), 400
-
-        con = fdb.connect(**DB_CONFIG)
-        cur = con.cursor()
-        cur.execute("""
-            SELECT FIRST 1 so.SONO
-            FROM SO so
-            WHERE UPPER(TRIM(so.SONO)) = UPPER(TRIM(?))
-              AND UPPER(TRIM(so.SONO)) STARTING WITH 'AI-PP-'
-        """, [so_no])
-        valid_so = cur.fetchone()
-        con.close()
-        if not valid_so:
-            return jsonify({"message": "Sales Order tidak ditemukan di Easy Accounting."}), 404
-
-        document_key = f"custom_{uuid.uuid4().hex}"
-        saved = save_sales_document_checklist(
-            so_no=so_no,
-            document_key=document_key,
-            is_required=False,
-            is_completed=False,
-            updated_by=user.get("username"),
-            document_label=label,
-            department=department,
-            is_custom=True,
-        )
-        audit_current_user(
-            "sales_custom_document_create",
-            "penjualan_so",
-            f"Tambah dokumen {label} untuk {so_no}",
-            saved,
-        )
-        return jsonify({"message": "Dokumen tambahan dibuat.", "data": saved})
-    except Exception as e:
-        print(f"Error api_sales_custom_document_create: {e}")
-        return jsonify({"message": "Gagal membuat dokumen tambahan.", "error": str(e)}), 500
-
-
-@app.route("/api/sales-document-completeness/custom-document", methods=["DELETE"])
-@jwt_required()
-def api_sales_custom_document_delete():
-    if not check_permission("penjualan_so"):
-        return jsonify({"message": "Akses ditolak"}), 403
-    user = get_current_user()
-    if user.get("role") not in ("admin", "marketing"):
-        return jsonify({"message": "Dokumen tambahan hanya dapat dihapus oleh MKT."}), 403
-    try:
-        payload = request.get_json(silent=True) or {}
-        so_no = str(payload.get("so_no") or "").strip()
-        document_key = str(payload.get("document_key") or "").strip().lower()
-        deleted = delete_sales_custom_document(so_no, document_key)
-        if not deleted:
-            return jsonify({"message": "Dokumen tambahan tidak ditemukan."}), 404
-        audit_current_user(
-            "sales_custom_document_delete",
-            "penjualan_so",
-            f"Hapus dokumen tambahan {so_no} / {document_key}",
-            {"so_no": so_no, "document_key": document_key},
-        )
-        return jsonify({"message": "Dokumen tambahan dihapus."})
-    except Exception as e:
-        print(f"Error api_sales_custom_document_delete: {e}")
-        return jsonify({"message": "Gagal menghapus dokumen tambahan.", "error": str(e)}), 500
+app.register_blueprint(create_integration_blueprint(_get_penjualan_so_data, INTEGRATION_API_KEY))
 
 
 @app.route("/api/penjualan-so/debug-status")

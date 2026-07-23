@@ -21,6 +21,7 @@ services:
       - APP_DB_USER=${APP_DB_USER:-postgres}
       - APP_DB_PASSWORD=${APP_DB_PASSWORD:-}
       - DRIVER_INTEGRATION_API_KEY=${DRIVER_INTEGRATION_API_KEY:-}
+      - EASY_INTEGRATION_API_KEY=${EASY_INTEGRATION_API_KEY}
       - EASY_BACKEND_PORT=5000
     volumes:
       - ./backend:/app
