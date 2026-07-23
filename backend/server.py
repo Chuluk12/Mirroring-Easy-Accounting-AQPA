@@ -8886,15 +8886,36 @@ def api_penjualan_flow_summary():
         }), 500
 
 
-def _get_penjualan_so_data():
-    search = request.args.get("search", "")
-    date_from = request.args.get("date_from", "")
-    date_to = request.args.get("date_to", "")
-    status = request.args.get("status", "")
-    offset = int(request.args.get("offset", 0))
-    limit = int(request.args.get("limit", 50))
+def _get_penjualan_so_data(options=None):
+    options = options or request.args
+    search = options.get("search", "")
+    date_from = options.get("date_from", "")
+    date_to = options.get("date_to", "")
+    status = options.get("status", "")
+    offset = int(options.get("offset", 0))
+    limit = int(options.get("limit", 50))
     if offset < 0 or not 1 <= limit <= 1000:
         raise ValueError("offset minimal 0 dan limit harus antara 1-1000")
+
+    sort_columns = {
+        "no_so": "so.SONO",
+        "tgl_so": "so.SODATE",
+        "tgl_estimasi": "so.ESTSHIPDATE",
+        "no_pelanggan": "pd.PERSONNO",
+        "nama_pelanggan": "pd.NAME",
+        "no_po_customer": "so.PONO",
+        "no_barang": "det.ITEMNO",
+        "qty": "det.QUANTITY",
+        "qty_shipped": "det.QTYSHIPPED",
+        "unit_price": "det.UNITPRICE",
+    }
+    sortby = options.get("sortby", "tgl_so")
+    sort_order = str(options.get("sort_order", "desc")).lower()
+    if sortby not in sort_columns:
+        raise ValueError(f"sortby tidak valid: {sortby}")
+    if sort_order not in {"asc", "desc"}:
+        raise ValueError("sort_order harus asc atau desc")
+    order_sql = f"{sort_columns[sortby]} {sort_order.upper()}, so.SONO, det.SEQ"
 
     con = fdb.connect(**DB_CONFIG)
     try:
@@ -8907,7 +8928,7 @@ def _get_penjualan_so_data():
                 {so_select}
             {_SO_FROM}
             WHERE {where_sql}
-            ORDER BY so.SODATE DESC, so.SONO, det.SEQ
+            ORDER BY {order_sql}
         """
         cur.execute(sql, [limit, offset] + params_where)
         rows = cur.fetchall()
@@ -8950,7 +8971,11 @@ def api_penjualan_so():
         return jsonify({"data": [], "total_rows": 0, "total_so": 0, "error": str(e)})
 
 
-app.register_blueprint(create_integration_blueprint(_get_penjualan_so_data, INTEGRATION_API_KEY))
+app.register_blueprint(create_integration_blueprint(
+    _get_penjualan_so_data,
+    INTEGRATION_API_KEY,
+    MODULE_COLUMNS["penjualan_so"],
+))
 
 
 @app.route("/api/penjualan-so/debug-status")
