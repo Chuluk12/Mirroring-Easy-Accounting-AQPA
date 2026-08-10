@@ -6,7 +6,9 @@ from flask_jwt_extended import (
     get_jwt_identity, get_jwt
 )
 from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
+import locale
 from auth import (
     init_db, get_user, get_user_permissions,
     get_all_users, get_user_by_id, create_user, delete_user, update_user_password, verify_password,
@@ -33,6 +35,13 @@ from auth import (
     update_user_salesman
 )
 from integration import create_integration_blueprint
+
+if not hasattr(locale, "resetlocale"):
+    def _resetlocale(category=locale.LC_ALL):
+        locale.setlocale(category, "")
+
+    locale.resetlocale = _resetlocale
+
 import fdb
 import hmac
 import os
@@ -105,7 +114,11 @@ DB_CONFIG = {
 
 
 BACKEND_PORT = int(os.getenv("EASY_BACKEND_PORT", "5000"))
-INTEGRATION_API_KEY = os.getenv("EASY_INTEGRATION_API_KEY", "")
+INTEGRATION_API_KEYS = [
+    key.strip()
+    for key in os.getenv("EASY_INTEGRATION_API_KEYS", os.getenv("EASY_INTEGRATION_API_KEY", "")).split(",")
+    if key.strip()
+]
 
 MODULE_COLUMNS = {
     "stock": [
@@ -8956,6 +8969,228 @@ def _get_penjualan_so_data(options=None):
         con.close()
 
 
+def _json_value(value):
+    if isinstance(value, Decimal):
+        return float(value)
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
+def _get_saved_reports_metadata(options=None):
+    options = options or request.args
+    search = str(options.get("search", "") or "").strip()
+    offset = int(options.get("offset", 0))
+    limit = int(options.get("limit", 50))
+    if offset < 0 or not 1 <= limit <= 1000:
+        raise ValueError("offset minimal 0 dan limit harus antara 1-1000")
+
+    con = fdb.connect(**DB_CONFIG)
+    try:
+        cur = con.cursor()
+        cur.execute("""
+            SELECT TRIM(rf.RDB$FIELD_NAME)
+            FROM RDB$RELATION_FIELDS rf
+            WHERE rf.RDB$RELATION_NAME = 'REPORTFORMAT'
+        """)
+        columns = {str(row[0] or "").strip().upper() for row in cur.fetchall()}
+
+        where = ["report_cat_id = 20", "type = 1"]
+        params = []
+        search_columns = [
+            column for column in ("REPORT_NAME", "NAME", "DESCRIPTION", "FORMAT_NAME", "TITLE", "REPORT_TITLE")
+            if column in columns
+        ]
+        if search and search_columns:
+            where.append("(" + " OR ".join(f"UPPER(CAST({column} AS VARCHAR(255))) LIKE ?" for column in search_columns) + ")")
+            params.extend([f"%{search.upper()}%"] * len(search_columns))
+
+        where_sql = " AND ".join(where)
+        cur.execute(f"SELECT COUNT(*) FROM REPORTFORMAT WHERE {where_sql}", params)
+        total_rows = int((cur.fetchone() or [0])[0] or 0)
+
+        cur.execute(f"""
+            SELECT FIRST ? SKIP ? *
+            FROM REPORTFORMAT
+            WHERE {where_sql}
+            ORDER BY seq, report_id
+        """, [limit, offset] + params)
+        field_names = [desc[0].strip().lower() for desc in cur.description]
+        data = [
+            {field_names[index]: _json_value(value) for index, value in enumerate(row)}
+            for row in cur.fetchall()
+        ]
+        return {"data": data, "total_rows": total_rows}
+    finally:
+        con.close()
+
+
+def _get_saved_report_list(id_report, options=None):
+    options = options or request.args
+    date_from = str(options.get("date_from", "") or "").strip()
+    date_to = str(options.get("date_to", "") or "").strip()
+    search = str(options.get("search", "") or "").strip()
+    user = str(options.get("user", "") or "").strip()
+    requested_columns = [column.strip().lower() for column in str(options.get("columns", "") or "").split(",") if column.strip()]
+    offset = int(options.get("offset", 0))
+    limit = int(options.get("limit", 50))
+    if offset < 0 or not 1 <= limit <= 1000:
+        raise ValueError("offset minimal 0 dan limit harus antara 1-1000")
+    if not date_from or not date_to:
+        raise ValueError("date_from dan date_to wajib diisi")
+
+    def filter_columns(rows):
+        if not requested_columns:
+            return rows
+        available = set(rows[0].keys()) if rows else set()
+        invalid = sorted(set(requested_columns) - available)
+        if invalid:
+            raise ValueError(f"columns tidak valid: {', '.join(invalid)}")
+        return [{column: row.get(column) for column in requested_columns} for row in rows]
+
+    con = fdb.connect(**DB_CONFIG)
+    try:
+        cur = con.cursor()
+        cur.execute('SELECT REPORT_ID, REPORT_NAME, REPORT_TITLE, "TABLE" FROM REPORTFORMAT WHERE REPORT_ID = ?', [id_report])
+        report = cur.fetchone()
+        if not report:
+            raise ValueError("id_report tidak ditemukan")
+
+        source_name = str(report[3] or "").strip().upper()
+        if source_name == "GET_JV":
+            conditions = []
+            params = [date_from, date_to, 1]
+            if search:
+                conditions.append("(UPPER(CAST(jv.JVNUMBER AS VARCHAR(255))) CONTAINING ? OR UPPER(CAST(jv.DESCR AS VARCHAR(255))) CONTAINING ? OR UPPER(CAST(jv.DESCRIPTION AS VARCHAR(255))) CONTAINING ?)")
+                params.extend([search.upper(), search.upper(), search.upper()])
+            if user:
+                conditions.append("(UPPER(CAST(u.USERNAME AS VARCHAR(255))) CONTAINING ? OR CAST(jv.USERID AS VARCHAR(255)) = ?)")
+                params.extend([user.upper(), user])
+            where_sql = " WHERE " + " AND ".join(conditions) if conditions else ""
+            from_sql = "FROM GET_JV(?, ?, ?) jv LEFT JOIN USERS u ON u.USERID = jv.USERID"
+
+            cur.execute(f"SELECT COUNT(*) {from_sql}{where_sql}", params)
+            total_rows = int((cur.fetchone() or [0])[0] or 0)
+
+            cur.execute(f"""
+                SELECT FIRST ? SKIP ?
+                    jv.JV_ID,
+                    jv.TRANSDATE,
+                    jv.DESCR,
+                    jv.JVNUMBER,
+                    jv.TRANSTYPE,
+                    jv.GLACCOUNT,
+                    jv.ACCOUNTNAME,
+                    jv.DESCRIPTION,
+                    jv.JVAMOUNT,
+                    jv.DEBET,
+                    jv.KREDIT,
+                    jv.RATE,
+                    jv.PRIMEAMOUNT,
+                    jv.SEQ,
+                    jv.CURRENCYNAME,
+                    jv.USERID,
+                    u.USERNAME,
+                    jv.DEPTID,
+                    jv.PROJECTID
+                {from_sql}
+                {where_sql}
+                ORDER BY jv.TRANSDATE DESC, jv.JV_ID DESC, jv.SEQ
+            """, [limit, offset] + params)
+            data = []
+            for row in cur.fetchall():
+                no_cek = str(row[2] or row[3] or "").strip()
+                data.append({
+                    "jv_id": _json_value(row[0]),
+                    "tanggal": _json_value(row[1]),
+                    "no_cek": no_cek,
+                    "no_jurnal_umum": str(row[3] or "").strip(),
+                    "trans_type": str(row[4] or "").strip(),
+                    "gl_account": str(row[5] or "").strip(),
+                    "account_name": str(row[6] or "").strip(),
+                    "deskripsi": str(row[7] or "").strip(),
+                    "jv_amount": _json_value(row[8]),
+                    "debet": _json_value(row[9]),
+                    "kredit": _json_value(row[10]),
+                    "jumlah": round(_to_float(row[9]) - _to_float(row[10]), 2),
+                    "rate": _json_value(row[11]),
+                    "prime_amount": _json_value(row[12]),
+                    "seq": _json_value(row[13]),
+                    "currency_name": str(row[14] or "").strip(),
+                    "user_id": _json_value(row[15]),
+                    "username": str(row[16] or "").strip(),
+                    "dept_id": _json_value(row[17]),
+                    "project_id": _json_value(row[18]),
+                    "no": no_cek,
+                })
+            return {"data": filter_columns(data), "total_rows": total_rows}
+
+        if source_name != "R_BANKBOOK":
+            raise ValueError(f"list untuk report table {source_name or '-'} belum didukung")
+
+        conditions = []
+        params = [date_from, date_to]
+        if search:
+            conditions.append("(UPPER(CAST(REFNO AS VARCHAR(255))) CONTAINING ? OR UPPER(CAST(CEKNO AS VARCHAR(255))) CONTAINING ? OR UPPER(CAST(DESCRIPTION AS VARCHAR(255))) CONTAINING ?)")
+            params.extend([search.upper(), search.upper(), search.upper()])
+        where_sql = " WHERE " + " AND ".join(conditions) if conditions else ""
+
+        cur.execute(f"SELECT COUNT(*) FROM R_BANKBOOK(?, ?){where_sql}", params)
+        total_rows = int((cur.fetchone() or [0])[0] or 0)
+
+        cur.execute(f"""
+                SELECT FIRST ? SKIP ?
+                    GLACCOUNT,
+                    TXDATE,
+                    REFNO,
+                    DESCRIPTION,
+                    AMOUNT,
+                    DEBIT,
+                    CREDIT,
+                    SOURCE,
+                    TXTYPE,
+                    PERSID,
+                    INVID,
+                    GLYEAR,
+                    GLPERIOD,
+                    GLHISTID,
+                    FASSETID,
+                    CEKNO,
+                    BALANCE
+            FROM R_BANKBOOK(?, ?)
+            {where_sql}
+            ORDER BY TXDATE DESC, GLHISTID DESC
+        """, [limit, offset] + params)
+        data = []
+        for row in cur.fetchall():
+            no_cek = str(row[15] or row[2] or "").strip()
+            data.append({
+                "gl_account": str(row[0] or "").strip(),
+                "tanggal": _json_value(row[1]),
+                "ref_no": str(row[2] or "").strip(),
+                "deskripsi": str(row[3] or "").strip(),
+                "amount": _json_value(row[4]),
+                "debit": _json_value(row[5]),
+                "credit": _json_value(row[6]),
+                "source": str(row[7] or "").strip(),
+                "tx_type": str(row[8] or "").strip(),
+                "person_id": _json_value(row[9]),
+                "invoice_id": _json_value(row[10]),
+                "gl_year": _json_value(row[11]),
+                "gl_period": _json_value(row[12]),
+                "glhist_id": _json_value(row[13]),
+                "fixed_asset_id": _json_value(row[14]),
+                "no_cek": no_cek,
+                "balance": _json_value(row[16]),
+                "no_jurnal_umum": str(row[2] or "").strip(),
+                "jumlah": _json_value(row[4]),
+                "no": no_cek,
+            })
+        return {"data": filter_columns(data), "total_rows": total_rows}
+    finally:
+        con.close()
+
+
 @app.route("/api/penjualan-so")
 @jwt_required()
 def api_penjualan_so():
@@ -8973,7 +9208,9 @@ def api_penjualan_so():
 
 app.register_blueprint(create_integration_blueprint(
     _get_penjualan_so_data,
-    INTEGRATION_API_KEY,
+    _get_saved_reports_metadata,
+    _get_saved_report_list,
+    INTEGRATION_API_KEYS,
     MODULE_COLUMNS["penjualan_so"],
 ))
 
