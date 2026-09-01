@@ -11,7 +11,7 @@ const { RangePicker } = DatePicker
 const { Search } = Input
 const { Text } = Typography
 
-const getCurrentMonthRange = () => [dayjs().startOf('month'), dayjs().endOf('month')]
+const getDefaultDateRange = () => [dayjs('2025-01-01'), dayjs()]
 const formatRp = value => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(value || 0)
 
 const EXPORT_COLUMNS = [
@@ -37,7 +37,7 @@ export default function DetailProject() {
   const [exporting, setExporting] = useState(false)
   const [search, setSearch] = useState(initialProject)
   const [projectType, setProjectType] = useState(initialType)
-  const [dateRange, setDateRange] = useState(initialProject ? [null, null] : getCurrentMonthRange)
+  const [dateRange, setDateRange] = useState(initialProject ? [null, null] : getDefaultDateRange)
   const [pagination, setPagination] = useState({ current: 1, pageSize: 50, total: 0 })
   const linkedProjectNo = searchParams.get('project') || ''
 
@@ -139,7 +139,7 @@ export default function DetailProject() {
                 { value: 'ga', label: 'GA' },
               ]}
             />
-            <Button icon={<ReloadOutlined />} onClick={() => { setSearchParams({}); setSearch(''); setDateRange(getCurrentMonthRange()); fetchData(1, pagination.pageSize) }}>Reset</Button>
+            <Button icon={<ReloadOutlined />} onClick={() => { setSearchParams({}); setSearch(''); setDateRange(getDefaultDateRange()); fetchData(1, pagination.pageSize) }}>Reset</Button>
             <Button type="primary" icon={<FileExcelOutlined />} loading={exporting} onClick={handleExport}>Export XLS</Button>
           </Space>
         )}

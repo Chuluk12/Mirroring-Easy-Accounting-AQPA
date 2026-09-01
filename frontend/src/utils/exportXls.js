@@ -87,6 +87,7 @@ const inferColumnType = column => {
 }
 
 const isCurrencyColumn = column => {
+  if (column.type === 'number') return false
   const inferredType = inferColumnType(column)
   if (inferredType === 'currency') return true
   if (inferredType !== 'number') return false
@@ -213,7 +214,7 @@ const stylesXml = () => `${XML_DECL}
   <cellXfs count="6">
     <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
     <xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/>
-    <xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
+    <xf numFmtId="2" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
     <xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
     <xf numFmtId="166" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>
     <xf numFmtId="167" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>

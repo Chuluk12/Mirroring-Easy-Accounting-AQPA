@@ -21,3 +21,6 @@ backend/.env
 /login-files-aqpa-package/
 /login-files-aqpa.zip
 /tools/__pycache__/
+
+# Local PostgreSQL backups and restore-test artifacts
+/backups/

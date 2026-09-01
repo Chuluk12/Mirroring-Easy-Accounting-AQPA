@@ -101,9 +101,13 @@ function FeeReferenceCell({ value, details = [], color, type }) {
           </Space>
           <div><Text type="secondary">Part number: </Text><Text>{detail.part_number || '-'}</Text></div>
           <div>
-            <Text type="secondary">Amount: </Text><Text>{formatCurrency(detail.amount_asal)}</Text>
-            <Text type="secondary"> → {type}: </Text><Text strong>{formatCurrency(detail.nilai_fee)}</Text>
+            <Text type="secondary">Dasar SO: </Text><Text>{formatCurrency(detail.amount_asal)}</Text>
+            <Text type="secondary"> → total {type}: </Text><Text>{formatCurrency(detail.nilai_fee)}</Text>
           </div>
+          {detail.nilai_alokasi_baris !== undefined && <>
+            <div><Text type="secondary">DPP baris/faktur: </Text><Text>{formatCurrency(detail.basis_realisasi)}</Text></div>
+            <div><Text type="secondary">Alokasi {type} ke baris: </Text><Text strong>{formatCurrency(detail.nilai_alokasi_baris)}</Text></div>
+          </>}
         </div>
       ))}
     </div>

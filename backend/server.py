@@ -29,8 +29,10 @@ from auth import (
     get_customer_part_numbers, get_vendor_part_numbers, save_part_number,
     get_purchase_request_remarks, save_purchase_request_remark,
     get_sales_delivery_remarks, save_sales_delivery_remark,
-    get_delivery_time_tracking, save_delivery_time_tracking
-    , get_fee_submissions, save_fee_submission, review_fee_submission, delete_fee_submission,
+    get_delivery_time_tracking, save_delivery_time_tracking,
+    get_sales_order_holds, save_sales_order_hold
+    , get_fee_submissions, save_fee_submission, review_fee_submission, execute_fee_submission, delete_fee_submission,
+    save_fee_submission_recipients,
     create_fee_submission_batch,
     update_user_salesman
 )
@@ -49,6 +51,10 @@ import re
 import threading
 import time
 import uuid
+import io
+import zipfile
+import xml.etree.ElementTree as ET
+from quotation_store import list_quotations, save_quotation, delete_quotation, create_revision, change_status
 
 app = Flask(__name__)
 CORS(app)
@@ -180,7 +186,8 @@ MODULE_COLUMNS = {
         "category_produk", "qty_shipped", "sisa_kirim", "stok_tersedia", "uom", "unit_price", "disc_pct",
         "disc_header_pct", "disc_header_amount", "discount_amount", "ppn_rate",
         "ppn_amount", "subtotal", "amount", "no_pengiriman", "tgl_pengiriman",
-        "status", "shipto", "deskripsi_so",
+        "status", "shipto", "deskripsi_so", "is_held", "hold_note",
+        "hold_updated_by", "hold_updated_at",
     ],
     "penjualan": [
         "no_penjualan", "tgl_penjualan", "no_pelanggan", "nama_pelanggan", "no_po",
@@ -223,7 +230,10 @@ MODULE_COLUMNS = {
         "mf_submitted_at", "mf_transaction_date", "cf_enabled", "cf_rate_pct", "cf_amount", "cf_status",
         "cf_submitted_at", "cf_transaction_date", "actual_mf",
         "actual_cf", "submission_id", "fee_type", "status", "submitted_at", "transaction_date",
+        "calculation_mode",
         "submitted_by", "reviewed_by", "reviewed_at", "review_note",
+        "executed_by", "executed_at", "execution_note", "recipients",
+        "tax_treatment", "tax_rate", "tax_amount", "gross_amount", "net_amount", "tax_reason",
         "batch_id", "batch_no", "customer_no", "customer_name", "customer_po",
     ],
     "customer_registration_documents": [
@@ -409,6 +419,7 @@ MODULE_PERMISSION_PARENTS = {
     "customer": "penjualan",
     "customer_registration_documents": "penjualan",
     "waktu_pengiriman": "penjualan_do",
+    "quotation": "penjualan",
 }
 
 def filter_record_columns(module, rows, user=None):
@@ -7759,11 +7770,14 @@ def _customer_rows_to_records(rows):
     return data
 
 
-def get_customer_data(search="", offset=0, limit=1000, status="active", include_total=False, sort_field="", sort_order=""):
+def get_customer_data(search="", offset=0, limit=1000, status="active", include_total=False, sort_field="", sort_order="", salesman_id=None):
     try:
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
         where_sql, params = _customer_where_clause(search, status)
+        if salesman_id is not None:
+            where_sql += " AND pd.SALESMANID = ?"
+            params.append(int(salesman_id))
 
         total = None
         if include_total:
@@ -8247,7 +8261,7 @@ def _so_net_dpp_amount(subtotal, order_subtotal, cash_discount, cash_disc_pc):
     return subtotal * max(1 - (header_discount / order_subtotal), 0)
 
 
-def _so_where_clause(search, date_from, date_to, status, line_closed_expr="COALESCE(so.CLOSED, 0)"):
+def _so_where_clause(search, date_from, date_to, status, line_closed_expr="COALESCE(so.CLOSED, 0)", held_so_numbers=None):
     """Buat WHERE clause + params untuk SO query."""
     conditions = ["det.ITEMNO IS NOT NULL"]
     params = []
@@ -8286,6 +8300,15 @@ def _so_where_clause(search, date_from, date_to, status, line_closed_expr="COALE
         conditions.append("COALESCE(det.QUANTITY, 0) > 0 AND COALESCE(det.QTYSHIPPED, 0) >= COALESCE(det.QUANTITY, 0)")
     elif status == "closed":
         conditions.append(f"{line_closed_expr} <> 0 AND (COALESCE(det.QUANTITY, 0) <= 0 OR COALESCE(det.QTYSHIPPED, 0) < COALESCE(det.QUANTITY, 0))")
+
+    if held_so_numbers is not None:
+        held_numbers = sorted({str(value or "").strip() for value in held_so_numbers if str(value or "").strip()})
+        if held_numbers:
+            placeholders = ", ".join(["?"] * len(held_numbers))
+            conditions.append(f"TRIM(so.SONO) IN ({placeholders})")
+            params.extend(held_numbers)
+        else:
+            conditions.append("1 = 0")
 
     return " AND ".join(conditions), params
 
@@ -8905,6 +8928,7 @@ def _get_penjualan_so_data(options=None):
     date_from = options.get("date_from", "")
     date_to = options.get("date_to", "")
     status = options.get("status", "")
+    hold_status = options.get("hold_status", "")
     offset = int(options.get("offset", 0))
     limit = int(options.get("limit", 50))
     if offset < 0 or not 1 <= limit <= 1000:
@@ -8934,7 +8958,8 @@ def _get_penjualan_so_data(options=None):
     try:
         cur = con.cursor()
         line_closed_expr = _so_line_closed_expr(cur)
-        where_sql, params_where = _so_where_clause(search, date_from, date_to, status, line_closed_expr)
+        held_so_numbers = get_sales_order_holds(held_only=True).keys() if hold_status == "held" else None
+        where_sql, params_where = _so_where_clause(search, date_from, date_to, status, line_closed_expr, held_so_numbers)
         so_select = _so_select_sql(line_closed_expr)
         sql = f"""
             SELECT FIRST ? SKIP ?
@@ -8959,6 +8984,11 @@ def _get_penjualan_so_data(options=None):
 
         delivery_map = _get_so_delivery_map(cur, rows)
         data = _build_so_rows(rows, delivery_map)
+        hold_map = get_sales_order_holds([row["no_so"] for row in data])
+        for row in data:
+            row.update(hold_map.get(row["no_so"], {
+                "is_held": False, "hold_note": "", "hold_updated_by": "", "hold_updated_at": "",
+            }))
         return {
             "data": data,
             "total_rows": total_rows,
@@ -9215,6 +9245,311 @@ app.register_blueprint(create_integration_blueprint(
 ))
 
 
+@app.route("/api/penjualan-so/<path:so_no>/hold", methods=["PUT"])
+@jwt_required()
+def api_penjualan_so_hold(so_no):
+    if not check_permission("penjualan_so"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    payload = request.get_json(silent=True) or {}
+    is_held = bool(payload.get("is_held"))
+    hold_note = str(payload.get("hold_note") or "").strip()
+    try:
+        identity = str(get_jwt_identity() or "")
+        result = save_sales_order_hold(so_no, is_held, hold_note, identity)
+        log_activity(
+            username=identity, action="UPDATE", module="penjualan_so",
+            description=f"{'Hold' if is_held else 'Lepas hold'} SO {so_no}: {hold_note}",
+        )
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"message": str(exc)}), 400
+    except Exception as exc:
+        print(f"Error api_penjualan_so_hold: {exc}")
+        return jsonify({"message": "Gagal memperbarui status hold", "error": str(exc)}), 500
+
+
+SALES_DOCUMENT_TYPES = [
+    {"key": "do_origin", "label": "DO Origin", "department": "LOG"},
+    {"key": "po", "label": "PO", "department": "MKT"},
+    {"key": "faktur_pajak", "label": "Faktur Pajak", "department": "ACC"},
+    {"key": "invoice", "label": "Invoice", "department": "ACC"},
+]
+SALES_DOCUMENT_KEYS = {item["key"] for item in SALES_DOCUMENT_TYPES}
+
+
+def _sales_document_status(documents):
+    required_count = sum(1 for doc in documents.values() if doc["required"])
+    completed_count = sum(
+        1 for doc in documents.values()
+        if doc["required"] and doc["completed"]
+    )
+    if required_count == 0:
+        status = "unconfigured"
+    elif completed_count == required_count:
+        status = "complete"
+    else:
+        status = "incomplete"
+    return {
+        "status": status,
+        "required_count": required_count,
+        "completed_count": completed_count,
+        "progress_pct": round(completed_count / required_count * 100) if required_count else 0,
+    }
+
+
+@app.route("/api/sales-document-completeness")
+@jwt_required()
+def api_sales_document_completeness():
+    if not check_permission("penjualan_so"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        search = str(request.args.get("search", "") or "").strip()
+        date_from = str(request.args.get("date_from", "") or "").strip()
+        date_to = str(request.args.get("date_to", "") or "").strip()
+        status_filter = str(request.args.get("status", "") or "").strip().lower()
+        offset = max(int(request.args.get("offset", 0)), 0)
+        limit = min(max(int(request.args.get("limit", 50)), 1), 200)
+
+        conditions = ["UPPER(TRIM(COALESCE(so.SONO, ''))) STARTING WITH 'AI-PP-'"]
+        params = []
+        if search:
+            conditions.append("""(
+                LOWER(so.SONO) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(pd.NAME, '')) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(so.PONO, '')) CONTAINING LOWER(?)
+                OR LOWER(COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, '')) CONTAINING LOWER(?)
+            )""")
+            params += [search, search, search, search]
+        if date_from:
+            conditions.append("so.SODATE >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("so.SODATE <= ?")
+            params.append(date_to)
+
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute(f"""
+            SELECT
+                so.SONO,
+                so.SODATE,
+                COALESCE(pd.PERSONNO, ''),
+                COALESCE(pd.NAME, ''),
+                COALESCE(so.PONO, ''),
+                COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, '')
+            FROM SO so
+            LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+            LEFT JOIN SALESMAN sm ON sm.SALESMANID = so.SALESMANID
+            WHERE {" AND ".join(conditions)}
+            ORDER BY so.SODATE DESC, so.SONO DESC
+        """, params)
+        source_rows = cur.fetchall()
+        con.close()
+
+        checklist_map = get_sales_document_checklists([row[0] for row in source_rows])
+        all_data = []
+        for row in source_rows:
+            so_no = str(row[0] or "").strip()
+            saved_documents = checklist_map.get(so_no, {})
+            documents = {}
+            for document in SALES_DOCUMENT_TYPES:
+                saved = saved_documents.get(document["key"], {})
+                documents[document["key"]] = {
+                    **document,
+                    "required": bool(saved.get("required", True)),
+                    "completed": bool(saved.get("completed", False)),
+                    "updated_by": saved.get("updated_by", ""),
+                    "updated_at": saved.get("updated_at", ""),
+                    "validated_by": saved.get("validated_by", ""),
+                    "validated_at": saved.get("validated_at", ""),
+                    "is_custom": False,
+                }
+            custom_documents = []
+            for document_key, saved in saved_documents.items():
+                if not saved.get("is_custom"):
+                    continue
+                custom_document = {
+                    "key": document_key,
+                    "label": saved.get("label") or "Dokumen Tambahan",
+                    "department": saved.get("department") or "LAINNYA",
+                    "required": bool(saved.get("required", False)),
+                    "completed": bool(saved.get("completed", False)),
+                    "updated_by": saved.get("updated_by", ""),
+                    "updated_at": saved.get("updated_at", ""),
+                    "validated_by": saved.get("validated_by", ""),
+                    "validated_at": saved.get("validated_at", ""),
+                    "is_custom": True,
+                }
+                documents[document_key] = custom_document
+                custom_documents.append(custom_document)
+            progress = _sales_document_status(documents)
+            item = {
+                "so_no": so_no,
+                "tgl_so": str(row[1]) if row[1] else "",
+                "no_pelanggan": str(row[2] or "").strip(),
+                "nama_pelanggan": str(row[3] or "").strip(),
+                "no_po_customer": str(row[4] or "").strip(),
+                "salesman": str(row[5] or "").strip(),
+                "documents": documents,
+                "custom_documents": custom_documents,
+                **progress,
+            }
+            all_data.append(item)
+
+        summary = {
+            "total": len(all_data),
+            "complete": sum(1 for row in all_data if row["status"] == "complete"),
+            "incomplete": sum(1 for row in all_data if row["status"] == "incomplete"),
+            "unconfigured": sum(1 for row in all_data if row["status"] == "unconfigured"),
+        }
+        data = [
+            row for row in all_data
+            if not status_filter or row["status"] == status_filter
+        ]
+        return jsonify({
+            "data": data[offset:offset + limit],
+            "total": len(data),
+            "summary": summary,
+            "document_types": SALES_DOCUMENT_TYPES,
+        })
+    except Exception as e:
+        print(f"Error api_sales_document_completeness: {e}")
+        return jsonify({"data": [], "total": 0, "error": str(e)}), 500
+
+
+@app.route("/api/sales-document-completeness/checklist", methods=["POST"])
+@jwt_required()
+def api_sales_document_completeness_save():
+    if not check_permission("penjualan_so"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    user = get_current_user()
+    if user.get("role") not in ("admin", "marketing"):
+        return jsonify({"message": "Checklist hanya dapat dikelola oleh MKT."}), 403
+    try:
+        payload = request.get_json(silent=True) or {}
+        so_no = str(payload.get("so_no") or "").strip()
+        document_key = str(payload.get("document_key") or "").strip().lower()
+        saved_documents = get_sales_document_checklists([so_no]).get(so_no, {})
+        is_saved_custom = bool(saved_documents.get(document_key, {}).get("is_custom"))
+        if not so_no or (document_key not in SALES_DOCUMENT_KEYS and not is_saved_custom):
+            return jsonify({"message": "SO atau jenis dokumen tidak valid."}), 400
+
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT FIRST 1 so.SONO
+            FROM SO so
+            WHERE UPPER(TRIM(so.SONO)) = UPPER(TRIM(?))
+              AND UPPER(TRIM(so.SONO)) STARTING WITH 'AI-PP-'
+        """, [so_no])
+        valid_so = cur.fetchone()
+        con.close()
+        if not valid_so:
+            return jsonify({"message": "Sales Order tidak ditemukan di Easy Accounting."}), 404
+
+        saved = save_sales_document_checklist(
+            so_no=so_no,
+            document_key=document_key,
+            is_required=bool(payload.get("required")),
+            is_completed=bool(payload.get("completed")),
+            updated_by=user.get("username"),
+            document_label=saved_documents.get(document_key, {}).get("label", ""),
+            department=saved_documents.get(document_key, {}).get("department", ""),
+            is_custom=is_saved_custom,
+        )
+        audit_current_user(
+            "sales_document_checklist_update",
+            "penjualan_so",
+            f"Update kelengkapan dokumen {so_no} / {document_key}",
+            saved,
+        )
+        return jsonify({"message": "Checklist dokumen disimpan.", "data": saved})
+    except Exception as e:
+        print(f"Error api_sales_document_completeness_save: {e}")
+        return jsonify({"message": "Gagal menyimpan checklist.", "error": str(e)}), 500
+
+
+@app.route("/api/sales-document-completeness/custom-document", methods=["POST"])
+@jwt_required()
+def api_sales_custom_document_create():
+    if not check_permission("penjualan_so"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    user = get_current_user()
+    if user.get("role") not in ("admin", "marketing"):
+        return jsonify({"message": "Dokumen tambahan hanya dapat dibuat oleh MKT."}), 403
+    try:
+        payload = request.get_json(silent=True) or {}
+        so_no = str(payload.get("so_no") or "").strip()
+        label = str(payload.get("label") or "").strip()
+        department = str(payload.get("department") or "").strip().upper()
+        if not so_no or not label or not department:
+            return jsonify({"message": "SO, nama dokumen, dan departemen wajib diisi."}), 400
+        if len(label) > 100 or len(department) > 20:
+            return jsonify({"message": "Nama dokumen atau departemen terlalu panjang."}), 400
+
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT FIRST 1 so.SONO
+            FROM SO so
+            WHERE UPPER(TRIM(so.SONO)) = UPPER(TRIM(?))
+              AND UPPER(TRIM(so.SONO)) STARTING WITH 'AI-PP-'
+        """, [so_no])
+        valid_so = cur.fetchone()
+        con.close()
+        if not valid_so:
+            return jsonify({"message": "Sales Order tidak ditemukan di Easy Accounting."}), 404
+
+        document_key = f"custom_{uuid.uuid4().hex}"
+        saved = save_sales_document_checklist(
+            so_no=so_no,
+            document_key=document_key,
+            is_required=False,
+            is_completed=False,
+            updated_by=user.get("username"),
+            document_label=label,
+            department=department,
+            is_custom=True,
+        )
+        audit_current_user(
+            "sales_custom_document_create",
+            "penjualan_so",
+            f"Tambah dokumen {label} untuk {so_no}",
+            saved,
+        )
+        return jsonify({"message": "Dokumen tambahan dibuat.", "data": saved})
+    except Exception as e:
+        print(f"Error api_sales_custom_document_create: {e}")
+        return jsonify({"message": "Gagal membuat dokumen tambahan.", "error": str(e)}), 500
+
+
+@app.route("/api/sales-document-completeness/custom-document", methods=["DELETE"])
+@jwt_required()
+def api_sales_custom_document_delete():
+    if not check_permission("penjualan_so"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    user = get_current_user()
+    if user.get("role") not in ("admin", "marketing"):
+        return jsonify({"message": "Dokumen tambahan hanya dapat dihapus oleh MKT."}), 403
+    try:
+        payload = request.get_json(silent=True) or {}
+        so_no = str(payload.get("so_no") or "").strip()
+        document_key = str(payload.get("document_key") or "").strip().lower()
+        deleted = delete_sales_custom_document(so_no, document_key)
+        if not deleted:
+            return jsonify({"message": "Dokumen tambahan tidak ditemukan."}), 404
+        audit_current_user(
+            "sales_custom_document_delete",
+            "penjualan_so",
+            f"Hapus dokumen tambahan {so_no} / {document_key}",
+            {"so_no": so_no, "document_key": document_key},
+        )
+        return jsonify({"message": "Dokumen tambahan dihapus."})
+    except Exception as e:
+        print(f"Error api_sales_custom_document_delete: {e}")
+        return jsonify({"message": "Gagal menghapus dokumen tambahan.", "error": str(e)}), 500
+
+
 @app.route("/api/penjualan-so/debug-status")
 @jwt_required()
 def api_penjualan_so_debug_status():
@@ -9293,12 +9628,14 @@ def api_penjualan_so_export():
         date_from = request.args.get("date_from", "")
         date_to   = request.args.get("date_to", "")
         status    = request.args.get("status", "")
+        hold_status = request.args.get("hold_status", "")
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
 
         line_closed_expr = _so_line_closed_expr(cur)
-        where_sql, params_where = _so_where_clause(search, date_from, date_to, status, line_closed_expr)
+        held_so_numbers = get_sales_order_holds(held_only=True).keys() if hold_status == "held" else None
+        where_sql, params_where = _so_where_clause(search, date_from, date_to, status, line_closed_expr, held_so_numbers)
         so_select = _so_select_sql(line_closed_expr)
 
         # Tidak pakai FIRST/SKIP — ambil semua
@@ -9314,6 +9651,11 @@ def api_penjualan_so_export():
         con.close()
 
         data = _build_so_rows(rows, delivery_map)
+        hold_map = get_sales_order_holds([row["no_so"] for row in data])
+        for row in data:
+            row.update(hold_map.get(row["no_so"], {
+                "is_held": False, "hold_note": "", "hold_updated_by": "", "hold_updated_at": "",
+            }))
         return jsonify({"data": filter_record_columns("penjualan_so", data), "total_rows": len(data)})
 
     except Exception as e:
@@ -12484,8 +12826,9 @@ def _profit_loss_mf_map(cur, no_sos):
             mf_ratio = max(min((invoice_total - cash_discount) / invoice_total, 1), 0)
             normalized_no_so = str(no_so or "").strip().upper()
             fee_amount = source_amount * mf_ratio
-            entry = result.setdefault(normalized_no_so, {"amount": 0.0, "rates": [], "details": []})
+            entry = result.setdefault(normalized_no_so, {"amount": 0.0, "base_amount": 0.0, "rates": [], "details": []})
             entry["amount"] += fee_amount
+            entry["base_amount"] += source_amount
             rate_pct = mf_ratio * 100
             if not any(abs(existing - rate_pct) < 0.000001 for existing in entry["rates"]):
                 entry["rates"].append(rate_pct)
@@ -12501,6 +12844,7 @@ def _profit_loss_mf_map(cur, no_sos):
     return {
         no_so: {
             "amount": round(entry["amount"], 2),
+            "base_amount": round(entry["base_amount"], 2),
             "percentage": _profit_loss_fee_percentage_label(entry["rates"]),
             "details": entry["details"],
         }
@@ -12521,10 +12865,13 @@ def _profit_loss_apply_mf(rows, mf_map):
 
     for no_so, grouped_rows in rows_by_so.items():
         fee = mf_map.get(no_so) or {}
-        target_amount = round(float(fee.get("amount") or 0), 2)
-        if not target_amount:
+        full_fee_amount = round(float(fee.get("amount") or 0), 2)
+        base_amount = max(float(fee.get("base_amount") or 0), 0)
+        if not full_fee_amount:
             continue
         total_weight = sum(max(float(row.get("jumlah") or 0), 0) for row in grouped_rows)
+        realized_ratio = min(total_weight / base_amount, 1) if base_amount > 0 else 1
+        target_amount = round(full_fee_amount * realized_ratio, 2)
         allocated_amount = 0.0
         for index, row in enumerate(grouped_rows):
             if index == len(grouped_rows) - 1:
@@ -12538,7 +12885,15 @@ def _profit_loss_apply_mf(rows, mf_map):
                 row_mf = round(target_amount / len(grouped_rows), 2)
             row["mf"] = row_mf
             row["mf_pct"] = fee.get("percentage", "")
-            row["mf_details"] = fee.get("details", [])
+            row["mf_details"] = [
+                {
+                    **detail,
+                    "nilai_alokasi_baris": row_mf,
+                    "basis_realisasi": round(max(float(row.get("jumlah") or 0), 0), 2),
+                    "dasar_so": round(base_amount, 2),
+                }
+                for detail in fee.get("details", [])
+            ]
             allocated_amount += row_mf
     return rows
 
@@ -12621,8 +12976,9 @@ def _profit_loss_cf_map(cur, no_sos):
             cf_ratio = max(min((invoice_total - cash_discount) / invoice_total, 1), 0)
             normalized_no_so = str(no_so or "").strip().upper()
             fee_amount = source_amount * cf_ratio
-            entry = result.setdefault(normalized_no_so, {"amount": 0.0, "rates": [], "details": []})
+            entry = result.setdefault(normalized_no_so, {"amount": 0.0, "base_amount": 0.0, "rates": [], "details": []})
             entry["amount"] += fee_amount
+            entry["base_amount"] += source_amount
             rate_pct = cf_ratio * 100
             if not any(abs(existing - rate_pct) < 0.000001 for existing in entry["rates"]):
                 entry["rates"].append(rate_pct)
@@ -12638,6 +12994,7 @@ def _profit_loss_cf_map(cur, no_sos):
     return {
         no_so: {
             "amount": round(entry["amount"], 2),
+            "base_amount": round(entry["base_amount"], 2),
             "percentage": _profit_loss_fee_percentage_label(entry["rates"]),
             "details": entry["details"],
         }
@@ -12658,10 +13015,13 @@ def _profit_loss_apply_cf(rows, cf_map):
 
     for no_so, grouped_rows in rows_by_so.items():
         fee = cf_map.get(no_so) or {}
-        target_amount = round(float(fee.get("amount") or 0), 2)
-        if not target_amount:
+        full_fee_amount = round(float(fee.get("amount") or 0), 2)
+        base_amount = max(float(fee.get("base_amount") or 0), 0)
+        if not full_fee_amount:
             continue
         total_weight = sum(max(float(row.get("jumlah") or 0), 0) for row in grouped_rows)
+        realized_ratio = min(total_weight / base_amount, 1) if base_amount > 0 else 1
+        target_amount = round(full_fee_amount * realized_ratio, 2)
         allocated_amount = 0.0
         for index, row in enumerate(grouped_rows):
             if index == len(grouped_rows) - 1:
@@ -12675,7 +13035,15 @@ def _profit_loss_apply_cf(rows, cf_map):
                 row_cf = round(target_amount / len(grouped_rows), 2)
             row["cf"] = row_cf
             row["cf_pct"] = fee.get("percentage", "")
-            row["cf_details"] = fee.get("details", [])
+            row["cf_details"] = [
+                {
+                    **detail,
+                    "nilai_alokasi_baris": row_cf,
+                    "basis_realisasi": round(max(float(row.get("jumlah") or 0), 0), 2),
+                    "dasar_so": round(base_amount, 2),
+                }
+                for detail in fee.get("details", [])
+            ]
             allocated_amount += row_cf
     return rows
 
@@ -13758,8 +14126,24 @@ def _fee_submission_is_marketing(user):
     return user.get("role") in {"marketing", "marketing_fee"}
 
 
-def _fee_submission_is_reviewer(user):
-    return not _fee_submission_is_marketing(user) and check_permission("fee_submission")
+def _fee_submission_is_manager(user):
+    return user.get("role") == "admin"
+
+
+def _fee_submission_is_finance(user):
+    return user.get("role") in {"admin", "akuntansi", "akutansi_staff"}
+
+
+CF_BANK_NAMES = [
+    "BRI", "Mandiri", "BNI", "BTN", "BCA", "BSI", "CIMB Niaga", "Danamon",
+    "PermataBank", "OCBC", "Maybank", "PaninBank", "UOB", "Bank Mega",
+    "KB Bank", "Muamalat", "SMBC Indonesia", "Jago", "blu", "BNC / neobank",
+    "SeaBank", "Allo Bank", "Aladin", "Bank Capital", "Sinarmas", "Commonwealth",
+    "DBS", "HSBC", "Standard Chartered", "Citibank", "Bank bjb", "Bank DKI",
+    "Bank Jateng", "Bank Jatim", "Bank Sumut", "Bank Nagari", "Bank BPD Bali",
+    "Bank Aceh", "Bank NTB Syariah", "BTPN Syariah",
+]
+CF_BANK_LOOKUP = {name.casefold(): name for name in CF_BANK_NAMES}
 
 
 def _fee_sales_order_rows(cur, salesman_id=None, so_nos=None, search="", date_from="", date_to=""):
@@ -13824,6 +14208,14 @@ def _fee_sales_order_rows(cur, salesman_id=None, so_nos=None, search="", date_fr
             "mf_rate_pct": 1.0, "mf_amount": round(dpp * 0.01, 2),
         })
     return result
+
+
+@app.route("/api/fee-submissions/banks")
+@jwt_required()
+def api_fee_submission_banks():
+    if not check_permission("fee_submission"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    return jsonify({"data": CF_BANK_NAMES, "total": len(CF_BANK_NAMES)})
 
 
 @app.route("/api/fee-submissions/sales-orders")
@@ -13894,7 +14286,12 @@ def api_fee_submissions_list():
     status = request.args.get("status", "").strip().lower()
     if status:
         data = [row for row in data if row.get("status") == status]
-    return jsonify({"data": filter_record_columns("fee_submission", data), "total": len(data), "can_review": _fee_submission_is_reviewer(user)})
+    return jsonify({
+        "data": filter_record_columns("fee_submission", data),
+        "total": len(data),
+        "can_manage": _fee_submission_is_manager(user),
+        "can_execute": _fee_submission_is_finance(user),
+    })
 
 
 @app.route("/api/fee-submissions", methods=["POST"])
@@ -13935,6 +14332,107 @@ def api_fee_submissions_create():
     salesman_ids = {int(row.get("salesman_id") or 0) for row in active_sales_rows}
     if len(salesman_ids) > 1:
         return jsonify({"message": "Satu pengajuan hanya boleh berisi transaksi dari satu marketing"}), 400
+    cf_sales_rows = [
+        row for row in sales_rows
+        if requested_map.get(row["so_no"].upper(), {}).get("include_cf")
+    ]
+    cf_customer_nos = {str(row.get("customer_no") or "").strip().upper() for row in cf_sales_rows}
+    if len(cf_customer_nos) > 1:
+        return jsonify({"message": "Satu pengajuan CF hanya boleh berisi transaksi dari satu customer"}), 400
+    cf_specs_by_so = {}
+    cf_mode = "percentage"
+    if cf_sales_rows:
+        first_requested_cf = requested_map[cf_sales_rows[0]["so_no"].upper()]
+        cf_mode = str(first_requested_cf.get("cf_calculation_mode") or "percentage").strip().lower()
+    if cf_mode == "nominal" and cf_sales_rows:
+        manual_total = _to_float(payload.get("cf_manual_amount") or first_requested_cf.get("cf_manual_amount"))
+        if manual_total <= 0:
+            return jsonify({"message": "Total nominal CF harus lebih dari 0"}), 400
+        total_dpp = sum(float(row.get("dpp") or 0) for row in cf_sales_rows)
+        allocated = 0.0
+        for index, row in enumerate(cf_sales_rows):
+            if index == len(cf_sales_rows) - 1:
+                amount = round(manual_total - allocated, 2)
+            else:
+                ratio = float(row.get("dpp") or 0) / total_dpp if total_dpp else 1 / len(cf_sales_rows)
+                amount = round(manual_total * ratio, 2)
+                allocated += amount
+            cf_specs_by_so[row["so_no"].upper()] = {
+                "mode": "nominal", "rate": 0.0, "amount": amount,
+            }
+    else:
+        for row in cf_sales_rows:
+            requested_cf = requested_map[row["so_no"].upper()]
+            rate = _to_float(requested_cf.get("cf_rate_pct"))
+            if rate <= 0 or rate > 100:
+                return jsonify({"message": f"Persentase CF untuk {row['so_no']} harus lebih dari 0 dan maksimal 100"}), 400
+            cf_specs_by_so[row["so_no"].upper()] = {
+                "mode": "percentage", "rate": rate,
+                "amount": round(row["dpp"] * rate / 100, 2),
+            }
+    cf_recipients = []
+    cf_tax = {
+        "treatment": "standard", "rate": 3.0, "tax_amount": 0.0,
+        "gross_amount": 0.0, "net_amount": 0.0, "reason": "",
+    }
+    if cf_sales_rows:
+        expected_cf_total = round(sum(spec["amount"] for spec in cf_specs_by_so.values()), 2)
+        treatment = str(payload.get("cf_tax_treatment") or "standard").strip().lower()
+        if treatment not in {"standard", "gross_up", "exempt"}:
+            return jsonify({"message": "Perlakuan PPh 23 tidak valid"}), 400
+        tax_rate = 3.0
+        reason = str(payload.get("cf_tax_reason") or "").strip()
+        if treatment == "exempt" and not reason:
+            return jsonify({"message": "Alasan tanpa PPh 23 wajib diisi"}), 400
+        if treatment == "gross_up":
+            gross_amount = round(expected_cf_total / (1 - tax_rate / 100), 2)
+            tax_amount = round(gross_amount - expected_cf_total, 2)
+            net_amount = expected_cf_total
+        elif treatment == "exempt":
+            gross_amount = expected_cf_total
+            tax_amount = 0.0
+            net_amount = expected_cf_total
+        else:
+            gross_amount = expected_cf_total
+            tax_amount = round(gross_amount * tax_rate / 100, 2)
+            net_amount = round(gross_amount - tax_amount, 2)
+        cf_tax = {
+            "treatment": treatment, "rate": tax_rate, "tax_amount": tax_amount,
+            "gross_amount": gross_amount, "net_amount": net_amount, "reason": reason,
+        }
+        raw_recipients = payload.get("cf_recipients") or []
+        if not raw_recipients:
+            return jsonify({"message": "Penerima CF wajib diisi"}), 400
+        for index, recipient in enumerate(raw_recipients, 1):
+            name = str(recipient.get("recipient_name") or "").strip()
+            method = str(recipient.get("payment_method") or "").strip().upper()
+            bank_name = str(recipient.get("bank_name") or "").strip()
+            account_number = str(recipient.get("account_number") or "").strip()
+            amount = net_amount if len(raw_recipients) == 1 else _to_float(recipient.get("amount"))
+            if not name:
+                return jsonify({"message": f"Nama penerima CF ke-{index} wajib diisi"}), 400
+            if method not in {"TF", "CASH"}:
+                return jsonify({"message": f"Metode pembayaran penerima CF ke-{index} wajib TF atau Cash"}), 400
+            if method == "TF" and (not bank_name or not account_number):
+                return jsonify({"message": f"Bank dan nomor rekening penerima CF ke-{index} wajib diisi untuk Transfer"}), 400
+            if amount <= 0:
+                return jsonify({"message": f"Nominal penerima CF ke-{index} harus lebih dari 0"}), 400
+            cf_recipients.append({
+                "recipient_name": name,
+                "payment_method": method,
+                "bank_name": CF_BANK_LOOKUP.get(bank_name.casefold(), bank_name) if method == "TF" else "",
+                "account_number": account_number if method == "TF" else "",
+                "amount": round(amount, 2),
+            })
+        allocated_total = round(sum(row["amount"] for row in cf_recipients), 2)
+        if abs(allocated_total - net_amount) > 0.5:
+            difference = allocated_total - net_amount
+            return jsonify({
+                "message": "Total nominal penerima CF tidak sesuai dengan nilai yang dibayarkan",
+                "expected_total": net_amount,
+                "allocated_total": allocated_total,
+                "difference": difference,
+            }), 400
     saved, errors = [], []
     batches = {}
     for sales_row in sales_rows:
@@ -13948,30 +14446,34 @@ def api_fee_submissions_create():
             elif mf_actual.get(so_no):
                 errors.append(f"{so_no} MF sudah direalisasikan")
             else:
-                fee_specs.append(("MF", mf_rate))
+                fee_specs.append(("MF", mf_rate, round(sales_row["dpp"] * mf_rate / 100, 2), "percentage"))
         if requested_row.get("include_cf"):
-            cf_rate = _to_float(requested_row.get("cf_rate_pct"))
-            if cf_rate <= 0 or cf_rate > 100:
-                errors.append(f"{so_no} persentase CF harus lebih dari 0 dan maksimal 100")
-            elif cf_actual.get(so_no):
+            cf_spec = cf_specs_by_so.get(so_no)
+            if cf_actual.get(so_no):
                 errors.append(f"{so_no} CF sudah direalisasikan")
-            else:
-                fee_specs.append(("CF", cf_rate))
-        for fee_type, rate in fee_specs:
+            elif cf_spec:
+                fee_specs.append(("CF", cf_spec["rate"], cf_spec["amount"], cf_spec["mode"]))
+        for fee_type, rate, amount, calculation_mode in fee_specs:
             batch_key = f"{fee_type}:{sales_row['salesman_id']}"
             if batch_key not in batches:
                 batches[batch_key] = create_fee_submission_batch(
                     fee_type, sales_row["salesman_id"], sales_row["salesman_name"],
                     user.get("username"), user.get("name"), str(payload.get("note") or "").strip(),
                     transaction_date,
+                    tax_treatment=cf_tax["treatment"] if fee_type == "CF" else "standard",
+                    tax_rate=cf_tax["rate"] if fee_type == "CF" else 3,
+                    tax_amount=cf_tax["tax_amount"] if fee_type == "CF" else 0,
+                    gross_amount=cf_tax["gross_amount"] if fee_type == "CF" else 0,
+                    net_amount=cf_tax["net_amount"] if fee_type == "CF" else 0,
+                    tax_reason=cf_tax["reason"] if fee_type == "CF" else "",
                 )
             batch = batches[batch_key]
-            amount = round(sales_row["dpp"] * rate / 100, 2)
             ok, message_text, submission_id = save_fee_submission(
                 sales_row["so_no"], fee_type, sales_row["salesman_id"], sales_row["salesman_name"],
                 sales_row["dpp"], rate, amount, user.get("username"), user.get("name"),
                 batch["id"], batch["batch_no"], sales_row["customer_no"],
                 sales_row["customer_name"], sales_row["customer_po"], transaction_date,
+                calculation_mode,
             )
             if ok:
                 saved.append(submission_id)
@@ -13979,6 +14481,14 @@ def api_fee_submissions_create():
                 errors.append(f"{so_no} {fee_type}: {message_text}")
     if saved:
         audit_current_user("fee_submission_create", "fee_submission", f"Mengirim {len(saved)} pengajuan CF/MF", {"ids": saved})
+    cf_batch = next((value for key, value in batches.items() if key.startswith("CF:")), None)
+    if cf_batch and cf_recipients:
+        saved_cf_ids = [
+            row["id"] for row in get_fee_submissions()
+            if row.get("id") in saved and row.get("batch_id") == cf_batch["id"] and row.get("fee_type") == "CF"
+        ]
+        if saved_cf_ids:
+            save_fee_submission_recipients(cf_batch["id"], cf_recipients)
     saved_rows = [row for row in get_fee_submissions() if row.get("id") in saved]
     created_batches = [value for value in batches.values() if any(
         row.get("batch_id") == value.get("id") for row in saved_rows
@@ -13995,8 +14505,8 @@ def api_fee_submission_review(submission_id):
     if not check_permission("fee_submission"):
         return jsonify({"message": "Akses ditolak"}), 403
     user = _fee_submission_user()
-    if not _fee_submission_is_reviewer(user):
-        return jsonify({"message": "Persetujuan hanya dapat dilakukan Finance"}), 403
+    if not _fee_submission_is_manager(user):
+        return jsonify({"message": "Persetujuan hanya dapat dilakukan Manajemen"}), 403
     payload = request.get_json(silent=True) or {}
     action = str(payload.get("action") or "").strip().lower()
     note = str(payload.get("note") or "").strip()
@@ -14006,8 +14516,27 @@ def api_fee_submission_review(submission_id):
         return jsonify({"message": "Alasan penolakan wajib diisi"}), 400
     if not review_fee_submission(submission_id, action, user.get("username"), note):
         return jsonify({"message": "Pengajuan tidak ditemukan atau sudah diproses"}), 409
-    audit_current_user("fee_submission_review", "fee_submission", f"{action} pengajuan {submission_id}", {"id": submission_id, "action": action, "note": note})
-    return jsonify({"message": "Pengajuan disetujui" if action == "approve" else "Pengajuan ditolak"})
+    audit_current_user("fee_submission_management_review", "fee_submission", f"{action} pengajuan {submission_id}", {"id": submission_id, "action": action, "note": note})
+    return jsonify({"message": "Pengajuan disetujui Manajemen dan diteruskan ke Finance" if action == "approve" else "Pengajuan ditolak Manajemen"})
+
+
+@app.route("/api/fee-submissions/<int:submission_id>/execute", methods=["POST"])
+@jwt_required()
+def api_fee_submission_execute(submission_id):
+    if not check_permission("fee_submission"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    user = _fee_submission_user()
+    if not _fee_submission_is_finance(user):
+        return jsonify({"message": "Eksekusi hanya dapat dilakukan Finance"}), 403
+    payload = request.get_json(silent=True) or {}
+    note = str(payload.get("note") or "").strip()
+    if not execute_fee_submission(submission_id, user.get("username"), note):
+        return jsonify({"message": "Pengajuan belum disetujui Manajemen atau sudah dieksekusi"}), 409
+    audit_current_user(
+        "fee_submission_execute", "fee_submission", f"Finance mengeksekusi pengajuan {submission_id}",
+        {"id": submission_id, "note": note},
+    )
+    return jsonify({"message": "Pengajuan berhasil dieksekusi Finance"})
 
 
 @app.route("/api/fee-submissions/<int:submission_id>", methods=["DELETE"])
@@ -14016,8 +14545,8 @@ def api_fee_submission_delete(submission_id):
     if not check_permission("fee_submission"):
         return jsonify({"message": "Akses ditolak"}), 403
     user = _fee_submission_user()
-    if not _fee_submission_is_reviewer(user):
-        return jsonify({"message": "Penghapusan hanya dapat dilakukan Finance"}), 403
+    if not _fee_submission_is_manager(user):
+        return jsonify({"message": "Penghapusan hanya dapat dilakukan Manajemen"}), 403
     deleted = delete_fee_submission(submission_id)
     if not deleted:
         return jsonify({"message": "Pengajuan tidak ditemukan atau sudah diproses"}), 409
@@ -14026,6 +14555,233 @@ def api_fee_submission_delete(submission_id):
         f"Menghapus pengajuan {deleted.get('batch_no') or deleted['so_no']} ({deleted.get('count', 1)} SO)", deleted,
     )
     return jsonify({"message": f"Pengajuan {deleted.get('batch_no') or deleted['so_no']} beserta {deleted.get('count', 1)} SO berhasil dihapus"})
+
+
+def _parse_quotation_xlsx(file_bytes):
+    namespace = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+        required = {"xl/workbook.xml", "xl/worksheets/sheet1.xml"}
+        if not required.issubset(set(archive.namelist())):
+            raise ValueError("Workbook tidak memiliki format template quotation")
+        shared = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            for node in root.findall("x:si", namespace):
+                shared.append("".join(text.text or "" for text in node.findall(".//x:t", namespace)))
+        sheet = ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
+        cells = {}
+        formulas = {}
+        for cell in sheet.findall(".//x:sheetData/x:row/x:c", namespace):
+            ref = cell.attrib.get("r", "")
+            value_node = cell.find("x:v", namespace)
+            formula_node = cell.find("x:f", namespace)
+            value = value_node.text if value_node is not None else ""
+            if cell.attrib.get("t") == "s" and value:
+                value = shared[int(value)]
+            cells[ref] = value or ""
+            if formula_node is not None:
+                formulas[ref] = formula_node.text or ""
+        if str(cells.get("A1", "")).strip().upper() != "QUOTATION":
+            raise ValueError("File bukan template Draft Penawaran")
+
+        def first_value(refs):
+            return next((str(cells.get(ref, "")).strip() for ref in refs if str(cells.get(ref, "")).strip()), "")
+
+        items = []
+        for row in range(10, 30):
+            description = first_value([f"B{row}", f"C{row}", f"D{row}", f"E{row}", f"F{row}", f"G{row}"])
+            qty = _to_float(cells.get(f"H{row}"))
+            unit_price = _to_float(cells.get(f"J{row}"))
+            if description or qty or unit_price:
+                items.append({
+                    "item_no": "", "description": description, "qty": qty or 1,
+                    "uom": str(cells.get(f"I{row}") or "EA").strip(),
+                    "unit_price": unit_price, "hpp": 0,
+                })
+        discount_raw = _to_float(cells.get("J31"))
+        vat_raw = _to_float(cells.get("J32"))
+        return {
+            "customer_name": first_value(["C3", "D3", "E3", "F3", "G3", "H3", "B3"]),
+            "customer_address": first_value(["C4", "D4", "E4", "F4", "G4", "H4"]),
+            "attention": first_value(["C6", "D6", "E6", "F6", "G6"]),
+            "delivery_to": first_value(["C7", "D7", "E7", "F7", "G7"]),
+            "quotation_no": str(cells.get("K3") or "").strip(),
+            "quotation_date_raw": str(cells.get("K4") or "").strip(),
+            "subject": str(cells.get("K6") or "").strip(),
+            "revision": int(_to_float(cells.get("K7"))),
+            "items": items,
+            "discount_type": "percentage",
+            "discount_value": discount_raw * 100 if 0 <= discount_raw <= 1 else discount_raw,
+            "vat_enabled": vat_raw > 0,
+            "vat_rate": vat_raw * 100 if 0 < vat_raw <= 1 else vat_raw,
+            "delivery_term": first_value(["C36", "D36", "E36", "F36", "G36", "H36"]),
+            "payment_terms": first_value(["C37", "D37", "E37", "F37", "G37", "H37"]),
+            "delivery_time": first_value(["C38", "D38", "E38", "F38", "G38", "H38"]),
+            "scope_of_works": first_value(["C39", "D39", "E39", "F39", "G39", "H39"]),
+            "price_validity": first_value(["C40", "D40", "E40", "F40", "G40", "H40"]),
+        }
+
+
+@app.route("/api/quotations/import", methods=["POST"])
+@jwt_required()
+def api_quotation_import():
+    if not check_permission("quotation"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    uploaded = request.files.get("file")
+    if not uploaded or not uploaded.filename.lower().endswith(".xlsx"):
+        return jsonify({"message": "Pilih file Excel .xlsx"}), 400
+    try:
+        data = _parse_quotation_xlsx(uploaded.read())
+        return jsonify({"message": f"{len(data['items'])} item berhasil dibaca", "data": data})
+    except (ValueError, KeyError, zipfile.BadZipFile) as exc:
+        return jsonify({"message": str(exc)}), 400
+
+
+@app.route("/api/quotations")
+@jwt_required()
+def api_quotations_list():
+    if not check_permission("quotation"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    user = get_current_user()
+    data = list_quotations()
+    if user.get("role") in {"marketing", "marketing_fee"}:
+        data = [row for row in data if row.get("created_by") == user.get("username")]
+    return jsonify({"data": data, "total": len(data), "can_approve": user.get("role") == "admin"})
+
+
+@app.route("/api/quotations/customers")
+@jwt_required()
+def api_quotation_customers():
+    if not check_permission("quotation"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    user = get_current_user()
+    salesman_id = None
+    if user.get("role") in {"marketing", "marketing_fee"}:
+        salesman_id = user.get("salesman_id")
+        if salesman_id is None:
+            return jsonify({"data": [], "warning": "Akun marketing belum dihubungkan dengan salesman Easy Accounting"})
+    data = get_customer_data(
+        search=str(request.args.get("search") or "").strip(),
+        offset=0,
+        limit=min(max(int(request.args.get("limit", 30)), 1), 100),
+        status="active",
+        salesman_id=salesman_id,
+    )
+    unique_customers = {}
+    for customer in data:
+        customer_no = str(customer.get("no_pelanggan") or "").strip().upper()
+        if customer_no and customer_no not in unique_customers:
+            unique_customers[customer_no] = customer
+    return jsonify({"data": list(unique_customers.values())})
+
+
+@app.route("/api/quotations", methods=["POST"])
+@jwt_required()
+def api_quotation_create():
+    if not check_permission("quotation"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    user = get_current_user()
+    payload = request.get_json(silent=True) or {}
+    if not str(payload.get("customer_name") or "").strip() or not payload.get("items"):
+        return jsonify({"message": "Customer dan minimal satu item wajib diisi"}), 400
+    for item in payload.get("items") or []:
+        if _to_float(item.get("hpp")) <= 0:
+            return jsonify({"message": f"Isi Harga Modal {item.get('description') or 'item'} sebelum mengisi Unit Price"}), 400
+        if _to_float(item.get("unit_price")) < _to_float(item.get("hpp")):
+            return jsonify({"message": f"Unit Price {item.get('description') or 'item'} tidak boleh lebih rendah dari Harga Modal"}), 400
+    quotation_id = save_quotation(payload, user.get("username"), user.get("name"))
+    audit_current_user("quotation_create", "quotation", f"Membuat quotation {quotation_id}", {"id": quotation_id})
+    return jsonify({"message": "Quotation berhasil disimpan", "id": quotation_id})
+
+
+@app.route("/api/quotations/<int:quotation_id>", methods=["PUT"])
+@jwt_required()
+def api_quotation_update(quotation_id):
+    if not check_permission("quotation"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    user = get_current_user()
+    payload = request.get_json(silent=True) or {}
+    for item in payload.get("items") or []:
+        if _to_float(item.get("hpp")) <= 0:
+            return jsonify({"message": f"Isi Harga Modal {item.get('description') or 'item'} sebelum mengisi Unit Price"}), 400
+        if _to_float(item.get("unit_price")) < _to_float(item.get("hpp")):
+            return jsonify({"message": f"Unit Price {item.get('description') or 'item'} tidak boleh lebih rendah dari Harga Modal"}), 400
+    quotation_id = save_quotation(
+        payload, user.get("username"), user.get("name"), quotation_id,
+        allow_submitted=user.get("role") == "admin",
+    )
+    if not quotation_id:
+        return jsonify({"message": "Quotation tidak ditemukan atau tidak dapat diedit"}), 409
+    return jsonify({"message": "Quotation berhasil diperbarui", "id": quotation_id})
+
+
+@app.route("/api/quotations/<int:quotation_id>", methods=["DELETE"])
+@jwt_required()
+def api_quotation_delete(quotation_id):
+    if not check_permission("quotation"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    user = get_current_user()
+    result = delete_quotation(
+        quotation_id,
+        user.get("username"),
+        is_admin=user.get("role") == "admin",
+    )
+    if result == "not_found":
+        return jsonify({"message": "Quotation tidak ditemukan"}), 404
+    if result == "forbidden":
+        return jsonify({"message": "Quotation ini tidak dapat dihapus"}), 403
+    audit_current_user("quotation_delete", "quotation", f"Menghapus quotation {quotation_id}", {"id": quotation_id})
+    return jsonify({"message": "Quotation berhasil dihapus"})
+
+
+@app.route("/api/quotations/<int:quotation_id>/status", methods=["POST"])
+@jwt_required()
+def api_quotation_status(quotation_id):
+    if not check_permission("quotation"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    user = get_current_user()
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action") or "")
+    note = str(payload.get("note") or "").strip()
+    if action not in {"submit", "approve", "reject"}:
+        return jsonify({"message": "Aksi tidak valid"}), 400
+    if action in {"approve", "reject"} and user.get("role") != "admin":
+        return jsonify({"message": "Approval hanya dapat dilakukan Manajemen"}), 403
+    if action == "reject" and not note:
+        return jsonify({"message": "Alasan penolakan wajib diisi"}), 400
+    if not change_status(quotation_id, action, user.get("username"), user.get("name"), note):
+        return jsonify({"message": "Status quotation sudah berubah"}), 409
+    return jsonify({"message": "Status quotation berhasil diperbarui"})
+
+
+@app.route("/api/quotations/<int:quotation_id>/revision", methods=["POST"])
+@jwt_required()
+def api_quotation_revision(quotation_id):
+    if not check_permission("quotation"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    user = get_current_user()
+    result, data = create_revision(
+        quotation_id,
+        user.get("username"),
+        user.get("name"),
+        is_admin=user.get("role") == "admin",
+    )
+    if result == "not_found":
+        return jsonify({"message": "Quotation tidak ditemukan"}), 404
+    if result == "forbidden":
+        return jsonify({"message": "Hanya quotation yang sudah disetujui yang dapat direvisi"}), 403
+    if result == "open_revision":
+        return jsonify({"message": "Masih ada revisi yang belum selesai diproses"}), 409
+    audit_current_user(
+        "quotation_revision",
+        "quotation",
+        f"Membuat revision {data['revision']} dari quotation {quotation_id}",
+        data,
+    )
+    return jsonify({
+        "message": f"Revision {data['revision']} berhasil dibuat sebagai Draft",
+        "data": data,
+    })
 
 
 @app.route("/api/hpp")

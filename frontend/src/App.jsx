@@ -31,6 +31,7 @@ const Salesman = lazy(() => import('./pages/Penjualan/Salesman'))
 const KelengkapanDokumen = lazy(() => import('./pages/Penjualan/KelengkapanDokumen'))
 const KelengkapanRegistrasiCustomer = lazy(() => import('./pages/Penjualan/KelengkapanRegistrasiCustomer'))
 const PengajuanFee = lazy(() => import('./pages/Penjualan/PengajuanFee'))
+const DaftarQuotation = lazy(() => import('./pages/Quotation/DaftarQuotation'))
 
 const HPP = lazy(() => import('./pages/Akuntansi/HPP'))
 const ProfitLoss = lazy(() => import('./pages/Akuntansi/ProfitLoss'))
@@ -82,6 +83,11 @@ function AppRoutes() {
           <Route path="pengajuan-fee/pengajuan" element={<Navigate to="/pengajuan-fee/pengajuan-cf" replace />} />
           <Route path="pengajuan-fee/persetujuan" element={<PrivateRoute module="fee_submission"><PengajuanFee view="approval" /></PrivateRoute>} />
           <Route path="pengajuan-fee" element={<PrivateRoute module="fee_submission"><Navigate to={userRole === 'marketing_fee' ? '/pengajuan-fee/pengajuan-cf' : '/pengajuan-fee/persetujuan'} replace /></PrivateRoute>} />
+          <Route path="quotation/daftar" element={<PrivateRoute module="quotation"><DaftarQuotation /></PrivateRoute>} />
+          <Route path="quotation/daftar/buat" element={<PrivateRoute module="quotation"><DaftarQuotation editorMode /></PrivateRoute>} />
+          <Route path="quotation/daftar/:quotationId/edit" element={<PrivateRoute module="quotation"><DaftarQuotation editorMode /></PrivateRoute>} />
+          <Route path="quotation/vs-po" element={<PrivateRoute module="quotation"><Navigate to="/quotation/daftar" replace /></PrivateRoute>} />
+          <Route path="quotation" element={<Navigate to="/quotation/daftar" replace />} />
 
           {/* Sub-menu Pembelian */}
           <Route path="pembelian/permintaan" element={<PrivateRoute module="permintaan"><DaftarPermintaan /></PrivateRoute>} />

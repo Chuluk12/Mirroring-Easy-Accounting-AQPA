@@ -268,6 +268,17 @@ export default function MainLayout() {
         ],
       })
     }
+    if (hasPermission('quotation')) {
+      items.push({
+        key: 'quotation-group',
+        icon: <FileTextOutlined />,
+        label: 'Quotation',
+        children: [
+          { key: '/quotation/daftar', icon: <FileTextOutlined />, label: 'Daftar Quotation' },
+          { key: '/quotation/vs-po', icon: <InteractionOutlined />, label: <DevelopmentMenuLabel>Quotation vs PO</DevelopmentMenuLabel>, disabled: true },
+        ],
+      })
+    }
 
     if (hasPermission('akuntansi')) {
       items.push({
@@ -328,6 +339,7 @@ export default function MainLayout() {
     if (path.startsWith('/pembelian')) return ['pembelian-group']
     if (path.startsWith('/penjualan')) return ['penjualan-group']
     if (path.startsWith('/akuntansi')) return ['akuntansi-group']
+    if (path.startsWith('/quotation')) return ['quotation-group']
     if (path.startsWith('/kolaborasi')) return ['kolaborasi-group']
     if (path.startsWith('/project')) return ['project-group']
     if (path === '/users' || path === '/audit-log') return ['admin-group']
@@ -428,7 +440,7 @@ export default function MainLayout() {
                 <UserOutlined className="easy-user-icon" />
                 <span className="easy-user-name">{user?.name}</span>
                 <Tag color={ROLE_COLOR[user?.role] || 'default'} className="easy-user-role">
-                  {user?.role === 'marketing_fee' ? 'MARKETING CF/MF' : user?.role?.toUpperCase()}
+                  {user?.role === 'marketing_fee' ? 'MARKETING CF/MF & QUOTATION' : user?.role?.toUpperCase()}
                 </Tag>
               </span>
             </Dropdown>

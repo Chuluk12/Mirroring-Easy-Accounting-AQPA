@@ -26,6 +26,7 @@ const MODULE_META = {
   customer_registration_documents: { label: 'Kelengkapan Dokumen Registrasi Customer', color: 'green' },
   salesman:      { label: 'Salesman',             color: 'geekblue' },
   fee_submission:{ label: 'Pengajuan CF & MF',    color: 'gold' },
+  quotation:     { label: 'Quotation',             color: 'blue' },
   pembelian:     { label: 'Daftar Pembelian',    color: 'orange' },
   permintaan:    { label: 'Daftar Permintaan',   color: 'cyan' },
   penerimaan:    { label: 'Daftar Penerimaan',   color: 'blue' },
@@ -61,7 +62,7 @@ const ROLE_COLOR = {
 }
 
 const roleColor = (role) => ROLE_COLOR[role] || 'default'
-const roleLabel = (role) => role === 'marketing_fee' ? 'MARKETING CF/MF' : String(role || '').toUpperCase()
+const roleLabel = (role) => role === 'marketing_fee' ? 'MARKETING CF/MF & QUOTATION' : String(role || '').toUpperCase()
 
 export default function Users() {
   const [users, setUsers] = useState([])
@@ -112,7 +113,7 @@ export default function Users() {
   const fetchSalesmen = async () => {
     try {
       const res = await api.get('/api/salesman', { params: { limit: 1000, suspended: 'no' } })
-      setSalesmen(res.data?.data || [])
+      setSalesmen(Array.isArray(res.data) ? res.data : (res.data?.data || []))
     } catch {
       setSalesmen([])
     }

@@ -1,12 +1,12 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import {
   Table, Input, Card, DatePicker, Space, Tag, Tooltip,
-  Statistic, Row, Col, Typography, Button, Select, Segmented, message
+  Statistic, Row, Col, Typography, Button, Select, Segmented, Modal, message
 } from 'antd'
 import {
   SearchOutlined, ReloadOutlined, ShoppingOutlined,
   FileExcelOutlined, FileDoneOutlined, LoadingOutlined,
-  CalendarOutlined, ArrowUpOutlined, ArrowDownOutlined, AimOutlined
+  CalendarOutlined, ArrowUpOutlined, ArrowDownOutlined, AimOutlined, PauseCircleOutlined
 } from '@ant-design/icons'
 import api from '../../api/client'
 import { exportRowsToXLS } from '../../utils/exportXls'
@@ -278,6 +278,8 @@ const SO_EXPORT_COLS = [
   { key: 'shipto',           label: 'Kirim Ke' },
   { key: 'deskripsi_so',     label: 'Keterangan' },
   { key: 'status',           label: 'Status' },
+  { key: 'is_held',          label: 'Status Hold', render: v => v ? 'Hold' : 'Tidak Hold' },
+  { key: 'hold_note',        label: 'Catatan Hold' },
 ]
 
 // â”€â”€â”€ Kolom export Invoice â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -292,6 +294,10 @@ function TabSO() {
   const [search, setSearch]       = useState('')
   const [dateRange, setDateRange] = useState(getCurrentMonthRange)
   const [statusFilter, setStatus] = useState('')
+  const [holdFilter, setHoldFilter] = useState('')
+  const [holdDialog, setHoldDialog] = useState(null)
+  const [holdNote, setHoldNote] = useState('')
+  const [savingHold, setSavingHold] = useState(false)
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
   const [summary, setSummary]     = useState({ total_so: 0, total_amount: 0 })
   const [selected, setSelected]   = useState(null)
@@ -299,11 +305,12 @@ function TabSO() {
   const searchRef = useRef('')
   const dateRangeRef = useRef(getCurrentMonthRange())
   const statusRef = useRef('')
+  const holdRef = useRef('')
   const pageRef = useRef(1)
   const pageSizeRef = useRef(20)
   const didMountRef = useRef(false)
 
-  const fetchData = useCallback(async (page = 1, pageSize = 20, sv = '', dates = [null, null], stat = '', showLoading = true) => {
+  const fetchData = useCallback(async (page = 1, pageSize = 20, sv = '', dates = [null, null], stat = '', showLoading = true, holdStat = holdRef.current) => {
     if (showLoading) setLoading(true)
     try {
       const params = { offset: (page - 1) * pageSize, limit: pageSize }
@@ -311,6 +318,7 @@ function TabSO() {
       if (dates[0]) params.date_from = dates[0].format('YYYY-MM-DD')
       if (dates[1]) params.date_to   = dates[1].format('YYYY-MM-DD')
       if (stat)     params.status    = stat
+      if (holdStat) params.hold_status = holdStat
 
       const res  = await api.get(`/api/penjualan-so`, {
         params, headers: { Authorization: `Bearer ${token}` },
@@ -327,6 +335,7 @@ function TabSO() {
       searchRef.current = sv
       dateRangeRef.current = dates
       statusRef.current = stat
+      holdRef.current = holdStat
     } catch (e) { console.error('Error fetch SO:', e) }
     finally { if (showLoading) setLoading(false) }
   }, [token])
@@ -374,14 +383,23 @@ function TabSO() {
     setStatus(nextStatus)
     fetchData(1, pageSizeRef.current, searchRef.current, dateRangeRef.current, nextStatus)
   }
+  const handleHoldFilter = (value) => {
+    const next = value || ''
+    setHoldFilter(next)
+    holdRef.current = next
+    pageRef.current = 1
+    fetchData(1, pageSizeRef.current, searchRef.current, dateRangeRef.current, statusRef.current, true, next)
+  }
   const handleReset  = ()    => {
     const nextDates = getCurrentMonthRange()
     setSearch('')
     setDateRange(nextDates)
     setStatus('')
+    setHoldFilter('')
     searchRef.current = ''
     dateRangeRef.current = nextDates
     statusRef.current = ''
+    holdRef.current = ''
     pageRef.current = 1
     pageSizeRef.current = 20
     fetchData(1, 20, '', nextDates, '')
@@ -393,6 +411,7 @@ function TabSO() {
     if (dateRangeRef.current[0]) params.date_from = dateRangeRef.current[0].format('YYYY-MM-DD')
     if (dateRangeRef.current[1]) params.date_to   = dateRangeRef.current[1].format('YYYY-MM-DD')
     if (statusRef.current)       params.status    = statusRef.current
+    if (holdRef.current)         params.hold_status = holdRef.current
     exportToExcel({
       endpoint: '/api/penjualan-so/export',
       params,
@@ -403,6 +422,43 @@ function TabSO() {
       token,
       setExporting,
     })
+  }
+
+  const saveHold = async (record, isHeld, note = '') => {
+    if (isHeld && !note.trim()) {
+      message.warning('Catatan alasan hold wajib diisi')
+      return
+    }
+    setSavingHold(true)
+    try {
+      await api.put(`/api/penjualan-so/${encodeURIComponent(record.no_so)}/hold`, {
+        is_held: isHeld,
+        hold_note: note.trim(),
+      }, { headers: { Authorization: `Bearer ${token}` } })
+      message.success(isHeld ? `SO ${record.no_so} berhasil di-hold` : `Hold SO ${record.no_so} berhasil dilepas`)
+      setHoldDialog(null)
+      setHoldNote('')
+      setSelected(null)
+      fetchData(pageRef.current, pageSizeRef.current, searchRef.current, dateRangeRef.current, statusRef.current, false)
+    } catch (error) {
+      message.error(error.response?.data?.message || 'Gagal memperbarui status hold')
+    } finally {
+      setSavingHold(false)
+    }
+  }
+
+  const handleHoldAction = (record) => {
+    if (record.is_held) {
+      Modal.confirm({
+        title: `Lepas hold SO ${record.no_so}?`,
+        content: record.hold_note ? `Catatan sebelumnya: ${record.hold_note}` : undefined,
+        okText: 'Lepas Hold', cancelText: 'Batal',
+        onOk: () => saveHold(record, false, record.hold_note || ''),
+      })
+      return
+    }
+    setHoldDialog(record)
+    setHoldNote('')
   }
 
   const serialColumn = {
@@ -478,12 +534,27 @@ function TabSO() {
       render: v => v ? <Tag color="blue">{dayjs(v).format('DD/MM/YYYY')}</Tag> : '-' },
     { title: 'Status', dataIndex: 'status', key: 'status', width: 120, fixed: 'right',
       render: v => <Tag color={STATUS_COLOR[v] || 'default'}>{v || '-'}</Tag> },
+    { title: 'Status Hold', key: 'is_held', width: 150, fixed: 'right',
+      render: (_, record) => {
+        const value = record.is_held
+        return (
+        <Tooltip title={value ? record.hold_note : 'Klik untuk menandai SO sedang di-hold'}>
+          <Button
+            size="small" danger={value} type={value ? 'primary' : 'default'}
+            icon={<PauseCircleOutlined />}
+            onClick={event => { event.stopPropagation(); handleHoldAction(record) }}
+          >{value ? 'Di-hold' : 'Hold'}</Button>
+        </Tooltip>
+        )
+      } },
   ]
 
   const detailRows = selected ? data.filter(row => row.no_so === selected.no_so) : []
   const detailFields = [
     { key: 'no_so', label: 'No. SO', render: v => <Text strong>{v}</Text> },
     { key: 'status', label: 'Status', render: v => <Tag color={STATUS_COLOR[v] || 'default'}>{v || '-'}</Tag> },
+    { key: 'is_held', label: 'Status Hold', render: (v, record) => v ? <Tag color="red">Di-hold</Tag> : <Tag>Tidak Hold</Tag> },
+    { key: 'hold_note', label: 'Catatan Hold' },
     { key: 'tgl_so', label: 'Tanggal SO', render: v => v ? dayjs(v).format('DD/MM/YYYY') : '-' },
     { key: 'tgl_estimasi', label: 'Estimasi Kirim', render: v => v ? (
       <Tag color={isOverdueEstimate(v, selected) ? 'red' : 'cyan'}>{dayjs(v).format('DD/MM/YYYY')}</Tag>
@@ -521,6 +592,10 @@ function TabSO() {
         title={<span><FileDoneOutlined style={{ marginRight: 8, color: '#1a73e8' }} />Pesanan Penjualan (Sales Order)</span>}
         extra={
           <Space wrap>
+            <Select placeholder="Semua Status Hold" allowClear style={{ width: 170 }}
+              value={holdFilter || undefined} onChange={handleHoldFilter}
+              options={[{ value: 'held', label: 'SO Di-hold' }]}
+            />
             <Select placeholder="Semua Status" allowClear style={{ width: 170 }}
               value={statusFilter || undefined} onChange={handleStatus}
               options={[
@@ -551,7 +626,7 @@ function TabSO() {
           columns={withTableSorters(visibleColumns)} dataSource={data} loading={loading}
           size="small"
           sticky={{ offsetHeader: 0 }}
-          scroll={{ x: 2815, y: 'calc(100vh - 340px)' }}
+          scroll={{ x: 2965, y: 'calc(100vh - 340px)' }}
           onRow={rec => ({
             onClick: () => setSelected(rec),
             style: { cursor: 'pointer' },
@@ -575,6 +650,26 @@ function TabSO() {
         lineRows={detailRows}
         lineColumns={visibleDetailColumns}
       />
+      <Modal
+        open={!!holdDialog}
+        title={`Hold SO ${holdDialog?.no_so || ''}`}
+        okText="Simpan Hold"
+        cancelText="Batal"
+        confirmLoading={savingHold}
+        onCancel={() => { setHoldDialog(null); setHoldNote('') }}
+        onOk={() => saveHold(holdDialog, true, holdNote)}
+      >
+        <Text type="secondary">Tuliskan alasan SO ini ditahan agar tim dapat melihat penyebab keterlambatannya.</Text>
+        <Input.TextArea
+          value={holdNote}
+          onChange={event => setHoldNote(event.target.value)}
+          placeholder="Contoh: Menunggu konfirmasi pembayaran customer"
+          rows={4}
+          maxLength={1000}
+          showCount
+          style={{ marginTop: 12 }}
+        />
+      </Modal>
       <style>{`
         .sales-freeze-table .ant-table-thead > tr > th {
           position: sticky;
