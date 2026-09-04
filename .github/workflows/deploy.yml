@@ -12,18 +12,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Connect to NetBird
-        uses: Alemiz112/netbird-connect@v1.0.1
-        with:
-          setup-key: ${{ secrets.NETBIRD_SETUP_KEY }}
-          hostname: github-actions-deploy
-          management-url: https://api.netbird.io:443
-
-      - name: Wait for NetBird
+      - name: Connect to OpenVPN
         run: |
-          sleep 10
-          netbird status
-          ping -c 3 ${{ secrets.SERVER_HOST }} || true
+          sudo apt-get update
+          sudo apt-get install -y openvpn
+
+          cat > /tmp/client.ovpn <<'EOF'
+          ${{ secrets.OPENVPN_CONFIG }}
+          EOF
+
+          sudo openvpn --config /tmp/client.ovpn --daemon
+
+          echo "Waiting for OpenVPN..."
+          for i in {1..20}; do
+            if ip addr show tun0 >/dev/null 2>&1; then
+              echo "OpenVPN connected"
+              ip addr show tun0
+              break
+            fi
+            sleep 2
+          done
+
+          ip addr show tun0
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3

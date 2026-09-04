@@ -36,7 +36,10 @@ from auth import (
     create_fee_submission_batch,
     update_user_salesman
 )
-from integration import create_integration_blueprint
+from integration import create_integration_blueprint, register_integration_docs
+from flask_apispec import FlaskApiSpec
+from apispec import APISpec
+from apispec.ext.marshmallow import MarshmallowPlugin
 
 if not hasattr(locale, "resetlocale"):
     def _resetlocale(category=locale.LC_ALL):
@@ -60,6 +63,17 @@ app = Flask(__name__)
 CORS(app)
 app.config["JWT_SECRET_KEY"] = "easy-dashboard-secret-2026"
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=8)
+app.config.update({
+    "APISPEC_SPEC": APISpec(
+        title="Easy Accounting AQPA API",
+        version="v1",
+        plugins=[MarshmallowPlugin()],
+        openapi_version="2.0",
+    ),
+    "APISPEC_SWAGGER_URL": "/swagger.json",
+    "APISPEC_SWAGGER_UI_URL": "/swagger-ui",
+})
+docs = FlaskApiSpec(app)
 
 jwt = JWTManager(app)
 socketio = SocketIO(app, cors_allowed_origins="*", max_http_buffer_size=50*1024*1024)
@@ -7089,23 +7103,22 @@ def api_penerimaan_export():
         return jsonify({"data": [], "total_rows": 0, "error": str(e)})
 
 
-@app.route("/api/pembelian")
-@jwt_required()
-def api_pembelian():
-    if not can_access_pembelian_request():
-        return jsonify({"message": "Akses ditolak"}), 403
+def _get_pembelian_data(options=None):
+    options = options or request.args
+    search    = str(options.get("search", "") or "").strip()
+    date_from = str(options.get("date_from", "") or "").strip()
+    date_to   = str(options.get("date_to", "") or "").strip()
+    status    = str(options.get("status", "") or "").strip()
+    po_type   = str(options.get("po_type", "") or "").strip().upper()
+    exclude_internal_so = str(options.get("exclude_internal_so", "")).lower() in ("1", "true", "yes")
+    include_payment = str(options.get("include_payment", "1")).lower() not in ("0", "false", "no")
+    offset    = int(options.get("offset", 0))
+    limit     = int(options.get("limit", 50))
+    if offset < 0 or not 1 <= limit <= 1000:
+        raise ValueError("offset minimal 0 dan limit harus antara 1-1000")
+
+    con = fdb.connect(**DB_CONFIG)
     try:
-        search    = request.args.get("search", "")
-        date_from = request.args.get("date_from", "")
-        date_to   = request.args.get("date_to", "")
-        status    = request.args.get("status", "")
-        po_type   = request.args.get("po_type", "").strip().upper()
-        exclude_internal_so = request.args.get("exclude_internal_so") in ("1", "true", "yes")
-        include_payment = request.args.get("include_payment", "1").lower() not in ("0", "false", "no")
-        summary_only = request.args.get("summary_only") in ("1", "true", "yes")
-        offset    = int(request.args.get("offset", 0))
-        limit     = int(request.args.get("limit", 50))
-        con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
         if exclude_internal_so:
             data, total_rows = build_liw_pur_mkt_rows(
@@ -7117,32 +7130,48 @@ def api_pembelian():
                 offset=offset,
                 limit=limit,
             )
-            con.close()
-            return jsonify({"data": filter_record_columns("pembelian", data), "total": total_rows, "total_rows": total_rows})
+            note_keys = [
+                (
+                    row.get("no_permintaan", ""),
+                    row.get("so_no", ""),
+                    row.get("no_pembelian", ""),
+                    row.get("no_barang", ""),
+                )
+                for row in data
+            ]
+            note_map = get_liw_purchase_notes(note_keys)
+            for row in data:
+                key = (
+                    row.get("no_permintaan", ""),
+                    row.get("so_no", ""),
+                    row.get("no_pembelian", ""),
+                    row.get("no_barang", ""),
+                )
+                notes = note_map.get(key, {})
+                row["note_pesanan"] = notes.get("note_pesanan", "") if isinstance(notes, dict) else ""
+                row["note_pengiriman"] = notes.get("note_pengiriman", "") if isinstance(notes, dict) else ""
+            return {
+                "data": data,
+                "total_rows": total_rows,
+                "total_amount": sum(row.get("amount", 0) for row in data),
+                "total_so": len({row.get("so_no") for row in data if row.get("so_no")}),
+            }
 
         conditions   = ["1=1"]
         params_where = []
         if search:
-            if exclude_internal_so:
-                conditions.append("""(
-                    LOWER(po.PONO) CONTAINING LOWER(?) OR LOWER(pd.NAME) CONTAINING LOWER(?)
-                    OR LOWER(rd.ITEMNO) CONTAINING LOWER(?) OR LOWER(rd.ITEMOVDESC) CONTAINING LOWER(?)
-                    OR LOWER(rq.REQNO) CONTAINING LOWER(?)
-                    OR LOWER(rd.ITEMRESERVED9) CONTAINING LOWER(?)
-                )""")
-            else:
-                conditions.append("""(
-                    LOWER(po.PONO) CONTAINING LOWER(?) OR LOWER(pd.NAME) CONTAINING LOWER(?)
-                    OR LOWER(det.ITEMNO) CONTAINING LOWER(?) OR LOWER(det.ITEMOVDESC) CONTAINING LOWER(?)
-                    OR LOWER(rq.REQNO) CONTAINING LOWER(?)
-                    OR LOWER(det.ITEMRESERVED9) CONTAINING LOWER(?)
-                )""")
+            conditions.append("""(
+                LOWER(po.PONO) CONTAINING LOWER(?) OR LOWER(pd.NAME) CONTAINING LOWER(?)
+                OR LOWER(det.ITEMNO) CONTAINING LOWER(?) OR LOWER(det.ITEMOVDESC) CONTAINING LOWER(?)
+                OR LOWER(rq.REQNO) CONTAINING LOWER(?)
+                OR LOWER(det.ITEMRESERVED9) CONTAINING LOWER(?)
+            )""")
             params_where += [search, search, search, search, search, search]
         if date_from:
-            conditions.append("rq.REQDATE >= ?" if exclude_internal_so else "po.PODATE >= ?")
+            conditions.append("po.PODATE >= ?")
             params_where.append(date_from)
         if date_to:
-            conditions.append("rq.REQDATE <= ?" if exclude_internal_so else "po.PODATE <= ?")
+            conditions.append("po.PODATE <= ?")
             params_where.append(date_to)
         po_type_prefixes = {
             "AI-S": "AI-S-",
@@ -7153,10 +7182,197 @@ def api_pembelian():
         if po_type in po_type_prefixes:
             conditions.append("UPPER(TRIM(COALESCE(po.PONO, ''))) STARTING WITH ?")
             params_where.append(po_type_prefixes[po_type])
-        if exclude_internal_so:
-            conditions.append("UPPER(TRIM(COALESCE(rd.ITEMRESERVED9, ''))) STARTING WITH 'AI-PP'")
+
         where_sql = " AND ".join(conditions)
-        if summary_only and not exclude_internal_so:
+
+        cur.execute(f"""
+            SELECT COUNT(*), COUNT(DISTINCT po.POID), COUNT(DISTINCT det.ITEMRESERVED9)
+            FROM PO po
+            LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
+            LEFT JOIN PODET det     ON det.POID = po.POID
+            LEFT JOIN REQUISITION rq ON rq.REQID = det.REQID
+            LEFT JOIN REQUISITIONDET rd ON rd.REQID = det.REQID AND rd.SEQ = det.REQSEQ
+            LEFT JOIN TERMOPMT tm ON tm.TERMID = po.TERMID
+            WHERE {where_sql}
+        """, params_where)
+        count_res = cur.fetchone() or [0, 0, 0]
+        total_rows = int(count_res[0] or 0)
+        total_po = int(count_res[1] or 0)
+        total_so = int(count_res[2] or 0)
+
+        cur.execute(f"""
+            SELECT FIRST ? SKIP ?
+                po.PONO, po.PODATE, po.EXPECTED,
+                pd.PERSONNO, pd.NAME, po.DESCRIPTION,
+                det.ITEMNO, det.ITEMOVDESC, det.QUANTITY,
+                det.ITEMUNIT, det.UNITPRICE, det.ITEMDISCPC,
+                det.TAXCODES, det.TAXABLEAMOUNT1, po.TAX1RATE,
+                det.QUANTITY * det.UNITPRICE AS SUBTOTAL,
+                rq.REQNO,
+                rq.REQDATE,
+                rd.REQDATE AS TARGET_RECEIVED,
+                det.ITEMRESERVED9,
+                (SELECT LIST(DISTINCT ai_recv.INVOICENO, ', ')
+                 FROM APINV ai_recv
+                 JOIN APITMDET apdet_recv ON apdet_recv.APINVOICEID = ai_recv.APINVOICEID
+                 WHERE apdet_recv.POID = det.POID
+                   AND apdet_recv.POSEQ = det.SEQ
+                ),
+                (SELECT MAX(ai_recv.INVOICEDATE)
+                 FROM APINV ai_recv
+                 JOIN APITMDET apdet_recv ON apdet_recv.APINVOICEID = ai_recv.APINVOICEID
+                 WHERE apdet_recv.POID = det.POID
+                   AND apdet_recv.POSEQ = det.SEQ
+                ),
+                det.ITEMRESERVED6,
+                po.CASHDISCOUNT,
+                po.CASHDISCPC,
+                (SELECT SUM(
+                    COALESCE(det_sum.QUANTITY, 0) * COALESCE(det_sum.UNITPRICE, 0) *
+                    (1 - (
+                        CASE
+                            WHEN TRIM(CAST(det_sum.ITEMDISCPC AS VARCHAR(32))) = '' THEN 0
+                            ELSE COALESCE(CAST(det_sum.ITEMDISCPC AS DOUBLE PRECISION), 0)
+                        END
+                    ) / 100)
+                 )
+                 FROM PODET det_sum
+                 WHERE det_sum.POID = po.POID),
+                po.TAX1AMOUNT,
+                po.TAX2AMOUNT,
+                po.FREIGHT,
+                tm.TERMNAME,
+                tm.NETDAYS,
+                po.POID
+            FROM PO po
+            LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
+            LEFT JOIN USERS u ON u.USERID = po.USERID
+            LEFT JOIN PODET det     ON det.POID = po.POID
+            LEFT JOIN REQUISITION rq ON rq.REQID = det.REQID
+            LEFT JOIN REQUISITIONDET rd ON rd.REQID = det.REQID AND rd.SEQ = det.REQSEQ
+            LEFT JOIN TERMOPMT tm ON tm.TERMID = po.TERMID
+            WHERE {where_sql}
+            ORDER BY po.PODATE DESC, po.PONO, det.SEQ
+        """, [limit, offset] + params_where)
+        rows = cur.fetchall()
+        sales_refs = {}
+        payment_map = _get_purchase_payment_map(cur, [(row[31], row[0]) for row in rows]) if include_payment else {}
+
+        data = []
+        for row in rows:
+            qty = float(row[8] or 0); price = float(row[10] or 0)
+            disc_pc = float(row[11] or 0); tax_rate = float(row[14] or 0)
+            amounts = _purchase_amounts(qty, price, disc_pc, row[25] if len(row) > 25 else 0, row[23] if len(row) > 23 else 0, row[24] if len(row) > 24 else 0)
+            ppn_amt  = float(row[13] or 0) if row[12] and row[12].strip() else 0
+            nilai_po = (
+                float(row[25] or 0)
+                + (float(row[26] or 0) if len(row) > 26 else 0)
+                + (float(row[27] or 0) if len(row) > 27 else 0)
+                + (float(row[28] or 0) if len(row) > 28 else 0)
+            )
+            poid = int(row[31] or 0) if len(row) > 31 else 0
+            payment = payment_map.get(poid, {})
+            uang_muka = _to_float(payment.get("uang_muka")) if include_payment else 0
+            sisa_po = max(nilai_po - uang_muka, 0)
+            no_faktur_pengajuan = ", ".join(payment.get("invoices", [])) if include_payment else ""
+            pengajuan_bayar = _to_float(payment.get("pengajuan_bayar")) if include_payment else 0
+            dibayar_fat = _to_float(payment.get("dibayar_fat")) if include_payment else 0
+            sisa_hutang_fat = max(_to_float(payment.get("sisa_hutang_fat")), 0) if include_payment else 0
+            if pengajuan_bayar <= 0.5:
+                status_fat = "Belum Diajukan"
+            elif sisa_hutang_fat <= 0.5:
+                status_fat = "Lunas"
+            elif dibayar_fat > 0.5:
+                status_fat = "Dibayar Sebagian"
+            else:
+                status_fat = "Belum Dibayar FAT"
+            sales_ref = sales_refs.get((str(row[19] or "").strip().upper(), str(row[6] or "").strip()), {})
+            data.append({
+                "no_pembelian": str(row[0] or "").strip(), "tgl_pembelian": str(row[1]) if row[1] else "",
+                "tgl_ekspetasi": str(row[2]) if row[2] else "",
+                "top": str(row[29] or "").strip() if len(row) > 29 and row[29] else (f"{int(row[30])} Hari" if len(row) > 30 and row[30] is not None else ""),
+                "no_permintaan": str(row[16] or "").strip(), "tgl_permintaan": str(row[17]) if row[17] else "",
+                "tgl_target_permintaan": str(row[18]) if row[18] else "",
+                "so_no": str(row[19] or "").strip(),
+                "no_penerimaan_barang": str(row[20] or "").strip(),
+                "tgl_penerimaan_barang": str(row[21]) if row[21] else "",
+                **sales_ref,
+                "no_pemasok": str(row[3] or "").strip(), "nama_pemasok": str(row[4] or "").strip(),
+                "purchaser": str(row[22] or "").strip() if len(row) > 22 else "",
+                "deskripsi": str(row[5] or "").strip(), "no_barang": str(row[6] or "").strip(),
+                "deskripsi_barang": str(row[7] or "").strip(), "qty": qty,
+                "uom": str(row[9] or "").strip(), "price": price, "disc_pct": disc_pc,
+                "diskon": amounts["diskon"],
+                "ppn_kode": str(row[12] or "").strip(), "ppn_rate": tax_rate,
+                "ppn_amount": round(ppn_amt, 2),
+                "pph": float(row[27] or 0) if len(row) > 27 else 0,
+                "add_cost": float(row[28] or 0) if len(row) > 28 else 0,
+                "dpp": amounts["dpp"],
+                "amount": amounts["amount"],
+                "nilai_po": round(nilai_po, 2),
+                "uang_muka": round(uang_muka, 2),
+                "sisa_po": round(sisa_po, 2),
+                "status_pembayaran": "Lunas" if nilai_po > 0 and sisa_po <= 0.5 else ("DP" if uang_muka > 0 else "Belum DP"),
+                "no_faktur_pengajuan": no_faktur_pengajuan,
+                "pengajuan_bayar": round(pengajuan_bayar, 2),
+                "dibayar_fat": round(dibayar_fat, 2),
+                "sisa_hutang_fat": round(sisa_hutang_fat, 2),
+                "status_fat": status_fat,
+                "total_easy": round(float(row[25] or 0), 2) if len(row) > 25 else amounts["amount"],
+            })
+
+        return {
+            "data": data,
+            "total_rows": total_rows,
+            "total_po": total_po,
+            "total_so": total_so,
+            "total_amount": sum(row.get("amount", 0) for row in data),
+        }
+    finally:
+        con.close()
+
+
+@app.route("/api/pembelian")
+@jwt_required()
+def api_pembelian():
+    if not can_access_pembelian_request():
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        summary_only = request.args.get("summary_only") in ("1", "true", "yes")
+        if summary_only:
+            search    = request.args.get("search", "")
+            date_from = request.args.get("date_from", "")
+            date_to   = request.args.get("date_to", "")
+            po_type   = request.args.get("po_type", "").strip().upper()
+            conditions   = ["1=1"]
+            params_where = []
+            if search:
+                conditions.append("""(
+                    LOWER(po.PONO) CONTAINING LOWER(?) OR LOWER(pd.NAME) CONTAINING LOWER(?)
+                    OR LOWER(det.ITEMNO) CONTAINING LOWER(?) OR LOWER(det.ITEMOVDESC) CONTAINING LOWER(?)
+                    OR LOWER(rq.REQNO) CONTAINING LOWER(?)
+                    OR LOWER(det.ITEMRESERVED9) CONTAINING LOWER(?)
+                )""")
+                params_where += [search, search, search, search, search, search]
+            if date_from:
+                conditions.append("po.PODATE >= ?")
+                params_where.append(date_from)
+            if date_to:
+                conditions.append("po.PODATE <= ?")
+                params_where.append(date_to)
+            po_type_prefixes = {
+                "AI-S": "AI-S-",
+                "AI-SRV": "AI-SRV",
+                "AI-BM": "AI-BM",
+                "AI-A": "AI-A",
+            }
+            if po_type in po_type_prefixes:
+                conditions.append("UPPER(TRIM(COALESCE(po.PONO, ''))) STARTING WITH ?")
+                params_where.append(po_type_prefixes[po_type])
+            where_sql = " AND ".join(conditions)
+
+            con = fdb.connect(**DB_CONFIG)
+            cur = con.cursor()
             summary_line_discpc = sql_number_expr("det_sum.ITEMDISCPC")
             cur.execute(f"""
                 SELECT
@@ -7250,230 +7466,18 @@ def api_pembelian():
                 }
             })
 
-        if exclude_internal_so:
-            cur.execute(f"""
-                SELECT COUNT(*)
-                FROM REQUISITION rq
-                LEFT JOIN REQUISITIONDET rd ON rd.REQID = rq.REQID
-                LEFT JOIN PODET det ON det.REQID = rq.REQID AND det.REQSEQ = rd.SEQ
-                LEFT JOIN PO po ON po.POID = det.POID
-                LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
-                LEFT JOIN TERMOPMT tm ON tm.TERMID = po.TERMID
-                LEFT JOIN ITEM i ON i.ITEMNO = rd.ITEMNO
-                WHERE {where_sql}
-                  AND rd.ITEMNO IS NOT NULL
-            """, params_where)
-            total_rows = int((cur.fetchone() or [0])[0] or 0)
-            cur.execute(f"""
-                SELECT FIRST ? SKIP ?
-                    po.PONO, po.PODATE, po.EXPECTED,
-                    pd.PERSONNO, pd.NAME, COALESCE(po.DESCRIPTION, rq.DESCRIPTION),
-                    rd.ITEMNO, COALESCE(rd.ITEMOVDESC, i.ITEMDESCRIPTION), COALESCE(det.QUANTITY, rd.QUANTITY),
-                    rd.ITEMUNIT, det.UNITPRICE, det.ITEMDISCPC,
-                    det.TAXCODES, det.TAXABLEAMOUNT1, po.TAX1RATE,
-                    COALESCE(det.QUANTITY, rd.QUANTITY) * COALESCE(det.UNITPRICE, 0) AS SUBTOTAL,
-                    rq.REQNO,
-                    rq.REQDATE,
-                    rd.REQDATE AS TARGET_RECEIVED,
-                    rd.ITEMRESERVED9,
-                    (SELECT LIST(DISTINCT ai_recv.INVOICENO, ', ')
-                     FROM APINV ai_recv
-                     JOIN APITMDET apdet_recv ON apdet_recv.APINVOICEID = ai_recv.APINVOICEID
-                     WHERE apdet_recv.POID = det.POID
-                       AND apdet_recv.POSEQ = det.SEQ
-                    ),
-                    (SELECT MAX(ai_recv.INVOICEDATE)
-                     FROM APINV ai_recv
-                     JOIN APITMDET apdet_recv ON apdet_recv.APINVOICEID = ai_recv.APINVOICEID
-                     WHERE apdet_recv.POID = det.POID
-                       AND apdet_recv.POSEQ = det.SEQ
-                    ),
-                    det.ITEMRESERVED6,
-                    po.CASHDISCOUNT,
-                    po.CASHDISCPC,
-                    (SELECT SUM(
-                        COALESCE(det_sum.QUANTITY, 0) * COALESCE(det_sum.UNITPRICE, 0) *
-                        (1 - (
-                            CASE
-                                WHEN TRIM(CAST(det_sum.ITEMDISCPC AS VARCHAR(32))) = '' THEN 0
-                                ELSE COALESCE(CAST(det_sum.ITEMDISCPC AS DOUBLE PRECISION), 0)
-                            END
-                        ) / 100)
-                     )
-                     FROM PODET det_sum
-                     WHERE det_sum.POID = po.POID),
-                    po.TAX1AMOUNT,
-                    po.TAX2AMOUNT,
-                    po.FREIGHT,
-                    tm.TERMNAME,
-                    tm.NETDAYS,
-                    po.POID
-                FROM REQUISITION rq
-                LEFT JOIN REQUISITIONDET rd ON rd.REQID = rq.REQID
-                LEFT JOIN PODET det ON det.REQID = rq.REQID AND det.REQSEQ = rd.SEQ
-                LEFT JOIN PO po ON po.POID = det.POID
-                LEFT JOIN USERS u ON u.USERID = po.USERID
-                LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
-                LEFT JOIN TERMOPMT tm ON tm.TERMID = po.TERMID
-                LEFT JOIN ITEM i ON i.ITEMNO = rd.ITEMNO
-                WHERE {where_sql}
-                  AND rd.ITEMNO IS NOT NULL
-                ORDER BY rq.REQDATE DESC, rq.REQNO, rd.SEQ
-            """, [limit, offset] + params_where)
-        else:
-            cur.execute(f"""
-                SELECT COUNT(*)
-                FROM PO po
-                LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
-                LEFT JOIN PODET det     ON det.POID = po.POID
-                LEFT JOIN REQUISITION rq ON rq.REQID = det.REQID
-                LEFT JOIN REQUISITIONDET rd ON rd.REQID = det.REQID AND rd.SEQ = det.REQSEQ
-                LEFT JOIN TERMOPMT tm ON tm.TERMID = po.TERMID
-                WHERE {where_sql}
-            """, params_where)
-            total_rows = int((cur.fetchone() or [0])[0] or 0)
-            cur.execute(f"""
-                SELECT FIRST ? SKIP ?
-                    po.PONO, po.PODATE, po.EXPECTED,
-                    pd.PERSONNO, pd.NAME, po.DESCRIPTION,
-                    det.ITEMNO, det.ITEMOVDESC, det.QUANTITY,
-                    det.ITEMUNIT, det.UNITPRICE, det.ITEMDISCPC,
-                    det.TAXCODES, det.TAXABLEAMOUNT1, po.TAX1RATE,
-                    det.QUANTITY * det.UNITPRICE AS SUBTOTAL,
-                    rq.REQNO,
-                    rq.REQDATE,
-                    rd.REQDATE AS TARGET_RECEIVED,
-                    det.ITEMRESERVED9,
-                    (SELECT LIST(DISTINCT ai_recv.INVOICENO, ', ')
-                     FROM APINV ai_recv
-                     JOIN APITMDET apdet_recv ON apdet_recv.APINVOICEID = ai_recv.APINVOICEID
-                     WHERE apdet_recv.POID = det.POID
-                       AND apdet_recv.POSEQ = det.SEQ
-                    ),
-                    (SELECT MAX(ai_recv.INVOICEDATE)
-                     FROM APINV ai_recv
-                     JOIN APITMDET apdet_recv ON apdet_recv.APINVOICEID = ai_recv.APINVOICEID
-                     WHERE apdet_recv.POID = det.POID
-                       AND apdet_recv.POSEQ = det.SEQ
-                    ),
-                    det.ITEMRESERVED6,
-                    po.CASHDISCOUNT,
-                    po.CASHDISCPC,
-                    (SELECT SUM(
-                        COALESCE(det_sum.QUANTITY, 0) * COALESCE(det_sum.UNITPRICE, 0) *
-                        (1 - (
-                            CASE
-                                WHEN TRIM(CAST(det_sum.ITEMDISCPC AS VARCHAR(32))) = '' THEN 0
-                                ELSE COALESCE(CAST(det_sum.ITEMDISCPC AS DOUBLE PRECISION), 0)
-                            END
-                        ) / 100)
-                     )
-                     FROM PODET det_sum
-                     WHERE det_sum.POID = po.POID),
-                    po.TAX1AMOUNT,
-                    po.TAX2AMOUNT,
-                    po.FREIGHT,
-                    tm.TERMNAME,
-                    tm.NETDAYS,
-                    po.POID
-                FROM PO po
-                LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
-                LEFT JOIN USERS u ON u.USERID = po.USERID
-                LEFT JOIN PODET det     ON det.POID = po.POID
-                LEFT JOIN REQUISITION rq ON rq.REQID = det.REQID
-                LEFT JOIN REQUISITIONDET rd ON rd.REQID = det.REQID AND rd.SEQ = det.REQSEQ
-                LEFT JOIN TERMOPMT tm ON tm.TERMID = po.TERMID
-                WHERE {where_sql}
-                ORDER BY po.PODATE DESC, po.PONO, det.SEQ
-            """, [limit, offset] + params_where)
-        rows = cur.fetchall()
-        sales_refs = _get_purchase_sales_reference_map(cur, rows) if exclude_internal_so else {}
-        payment_map = _get_purchase_payment_map(cur, [(row[31], row[0]) for row in rows]) if include_payment else {}
-        con.close()
-        data = []
-        for row in rows:
-            qty = float(row[8] or 0); price = float(row[10] or 0)
-            disc_pc = float(row[11] or 0); tax_rate = float(row[14] or 0)
-            amounts = _purchase_amounts(qty, price, disc_pc, row[25] if len(row) > 25 else 0, row[23] if len(row) > 23 else 0, row[24] if len(row) > 24 else 0)
-            ppn_amt  = float(row[13] or 0) if row[12] and row[12].strip() else 0
-            nilai_po = (
-                float(row[25] or 0)
-                + (float(row[26] or 0) if len(row) > 26 else 0)
-                + (float(row[27] or 0) if len(row) > 27 else 0)
-                + (float(row[28] or 0) if len(row) > 28 else 0)
-            )
-            poid = int(row[31] or 0) if len(row) > 31 else 0
-            payment = payment_map.get(poid, {})
-            uang_muka = _to_float(payment.get("uang_muka")) if include_payment else 0
-            sisa_po = max(nilai_po - uang_muka, 0)
-            no_faktur_pengajuan = ", ".join(payment.get("invoices", [])) if include_payment else ""
-            pengajuan_bayar = _to_float(payment.get("pengajuan_bayar")) if include_payment else 0
-            dibayar_fat = _to_float(payment.get("dibayar_fat")) if include_payment else 0
-            sisa_hutang_fat = max(_to_float(payment.get("sisa_hutang_fat")), 0) if include_payment else 0
-            if pengajuan_bayar <= 0.5:
-                status_fat = "Belum Diajukan"
-            elif sisa_hutang_fat <= 0.5:
-                status_fat = "Lunas"
-            elif dibayar_fat > 0.5:
-                status_fat = "Dibayar Sebagian"
-            else:
-                status_fat = "Belum Dibayar FAT"
-            sales_ref = sales_refs.get((str(row[19] or "").strip().upper(), str(row[6] or "").strip()), {})
-            data.append({
-                "no_pembelian": str(row[0] or "").strip(), "tgl_pembelian": str(row[1]) if row[1] else "",
-                "tgl_ekspetasi": str(row[2]) if row[2] else "",
-                "top": str(row[29] or "").strip() if len(row) > 29 and row[29] else (f"{int(row[30])} Hari" if len(row) > 30 and row[30] is not None else ""),
-                "no_permintaan": str(row[16] or "").strip(), "tgl_permintaan": str(row[17]) if row[17] else "",
-                "tgl_target_permintaan": str(row[18]) if row[18] else "",
-                "so_no": str(row[19] or "").strip(),
-                "no_penerimaan_barang": str(row[20] or "").strip(),
-                "tgl_penerimaan_barang": str(row[21]) if row[21] else "",
-                **sales_ref,
-                "no_pemasok": str(row[3] or "").strip(), "nama_pemasok": str(row[4] or "").strip(),
-                "purchaser": str(row[22] or "").strip() if len(row) > 22 else "",
-                "deskripsi": str(row[5] or "").strip(), "no_barang": str(row[6] or "").strip(),
-                "deskripsi_barang": str(row[7] or "").strip(), "qty": qty,
-                "uom": str(row[9] or "").strip(), "price": price, "disc_pct": disc_pc,
-                "diskon": amounts["diskon"],
-                "ppn_kode": str(row[12] or "").strip(), "ppn_rate": tax_rate,
-                "ppn_amount": round(ppn_amt, 2),
-                "pph": float(row[27] or 0) if len(row) > 27 else 0,
-                "add_cost": float(row[28] or 0) if len(row) > 28 else 0,
-                "dpp": amounts["dpp"],
-                "amount": amounts["amount"],
-                "nilai_po": round(nilai_po, 2),
-                "uang_muka": round(uang_muka, 2),
-                "sisa_po": round(sisa_po, 2),
-                "status_pembayaran": "Lunas" if nilai_po > 0 and sisa_po <= 0.5 else ("DP" if uang_muka > 0 else "Belum DP"),
-                "no_faktur_pengajuan": no_faktur_pengajuan,
-                "pengajuan_bayar": round(pengajuan_bayar, 2),
-                "dibayar_fat": round(dibayar_fat, 2),
-                "sisa_hutang_fat": round(sisa_hutang_fat, 2),
-                "status_fat": status_fat,
-                "total_easy": round(float(row[25] or 0), 2) if len(row) > 25 else amounts["amount"],
-            })
-        if exclude_internal_so:
-            note_keys = [
-                (
-                    row.get("no_permintaan", ""),
-                    row.get("so_no", ""),
-                    row.get("no_pembelian", ""),
-                    row.get("no_barang", ""),
-                )
-                for row in data
-            ]
-            note_map = get_liw_purchase_notes(note_keys)
-            for row in data:
-                key = (
-                    row.get("no_permintaan", ""),
-                    row.get("so_no", ""),
-                    row.get("no_pembelian", ""),
-                    row.get("no_barang", ""),
-                )
-                notes = note_map.get(key, {})
-                row["note_pesanan"] = notes.get("note_pesanan", "") if isinstance(notes, dict) else ""
-                row["note_pengiriman"] = notes.get("note_pengiriman", "") if isinstance(notes, dict) else ""
-        return jsonify({"data": filter_record_columns("pembelian", data), "total": total_rows, "total_rows": total_rows})
+        result = _get_pembelian_data()
+        data = filter_record_columns("pembelian", result["data"])
+        return jsonify({
+            "data": data,
+            "total": result["total_rows"],
+            "total_rows": result["total_rows"],
+            "total_so": result.get("total_so", 0),
+            "total_amount": result.get("total_amount", 0),
+        })
+    except Exception as e:
+        print(f"Error api_pembelian: {e}")
+        return jsonify({"data": [], "total": 0, "total_rows": 0, "error": str(e)})
     except Exception as e:
         print(f"Error api_pembelian: {e}")
         return jsonify({"data": [], "total": 0, "error": str(e)})
@@ -9242,7 +9246,10 @@ app.register_blueprint(create_integration_blueprint(
     _get_saved_report_list,
     INTEGRATION_API_KEYS,
     MODULE_COLUMNS["penjualan_so"],
+    get_pembelian_data=_get_pembelian_data,
+    available_pembelian_columns=MODULE_COLUMNS.get("pembelian", []),
 ))
+register_integration_docs(docs)
 
 
 @app.route("/api/penjualan-so/<path:so_no>/hold", methods=["PUT"])
