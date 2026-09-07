@@ -73,7 +73,7 @@ app.config.update({
     "APISPEC_SWAGGER_URL": "/swagger.json",
     "APISPEC_SWAGGER_UI_URL": "/swagger-ui",
 })
-docs = FlaskApiSpec(app)
+docs = FlaskApiSpec(app, document_options=False)
 
 jwt = JWTManager(app)
 socketio = SocketIO(app, cors_allowed_origins="*", max_http_buffer_size=50*1024*1024)
@@ -9003,6 +9003,57 @@ def _get_penjualan_so_data(options=None):
         con.close()
 
 
+def _get_penjualan_so_by_no(so_no):
+    so_no = str(so_no or "").strip()
+    if not so_no:
+        raise ValueError("no_so tidak boleh kosong")
+
+    con = fdb.connect(**DB_CONFIG)
+    try:
+        cur = con.cursor()
+        line_closed_expr = _so_line_closed_expr(cur)
+        so_select = _so_select_sql(line_closed_expr)
+        sql = f"""
+            SELECT
+                {so_select}
+            {_SO_FROM}
+            WHERE det.ITEMNO IS NOT NULL
+              AND UPPER(TRIM(so.SONO)) = CAST(? AS VARCHAR(255))
+            ORDER BY det.SEQ
+        """
+        cur.execute(sql, [so_no.upper()])
+        rows = cur.fetchall()
+        if not rows:
+            return None
+
+        delivery_map = _get_so_delivery_map(cur, rows)
+        data = _build_so_rows(rows, delivery_map)
+        hold_map = get_sales_order_holds([row["no_so"] for row in data])
+        for row in data:
+            row.update(hold_map.get(row["no_so"], {
+                "is_held": False, "hold_note": "", "hold_updated_by": "", "hold_updated_at": "",
+            }))
+        return {
+            "no_so": data[0]["no_so"],
+            "tgl_so": data[0]["tgl_so"],
+            "tgl_estimasi": data[0]["tgl_estimasi"],
+            "no_pelanggan": data[0]["no_pelanggan"],
+            "nama_pelanggan": data[0]["nama_pelanggan"],
+            "no_po_customer": data[0]["no_po_customer"],
+            "nama_salesman": data[0]["nama_salesman"],
+            "deskripsi_so": data[0]["deskripsi_so"],
+            "shipto": data[0]["shipto"],
+            "is_held": data[0]["is_held"],
+            "hold_note": data[0]["hold_note"],
+            "hold_updated_by": data[0]["hold_updated_by"],
+            "hold_updated_at": data[0]["hold_updated_at"],
+            "total_amount": sum(row.get("amount", 0) for row in data),
+            "items": data,
+        }
+    finally:
+        con.close()
+
+
 def _json_value(value):
     if isinstance(value, Decimal):
         return float(value)
@@ -9240,6 +9291,26 @@ def api_penjualan_so():
         return jsonify({"data": [], "total_rows": 0, "total_so": 0, "error": str(e)})
 
 
+@app.route("/api/penjualan-so/<path:so_no>", methods=["GET"])
+@jwt_required()
+def api_penjualan_so_by_no(so_no):
+    """Endpoint ambil detail SO berdasarkan nomor SO."""
+    if not check_permission("penjualan_so"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        result = _get_penjualan_so_by_no(so_no)
+        if not result:
+            return jsonify({"message": f"Sales Order '{so_no}' tidak ditemukan"}), 404
+        if "items" in result:
+            result["items"] = filter_record_columns("penjualan_so", result["items"])
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
+        print(f"Error api_penjualan_so_by_no: {e}")
+        return jsonify({"message": "Gagal mengambil data sales order", "error": str(e)}), 500
+
+
 app.register_blueprint(create_integration_blueprint(
     _get_penjualan_so_data,
     _get_saved_reports_metadata,
@@ -9248,6 +9319,7 @@ app.register_blueprint(create_integration_blueprint(
     MODULE_COLUMNS["penjualan_so"],
     get_pembelian_data=_get_pembelian_data,
     available_pembelian_columns=MODULE_COLUMNS.get("pembelian", []),
+    get_penjualan_so_by_no=_get_penjualan_so_by_no,
 ))
 register_integration_docs(docs)
 

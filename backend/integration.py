@@ -53,6 +53,7 @@ class SavedReportListQuerySchema(Schema):
 
 def register_integration_docs(docs: FlaskApiSpec):
     docs.register(penjualan_so, blueprint="integration")
+    docs.register(penjualan_so_detail, blueprint="integration")
     docs.register(pembelian, blueprint="integration")
     docs.register(saved_reports, blueprint="integration")
     docs.register(saved_report_list, blueprint="integration")
@@ -81,6 +82,37 @@ def register_integration_docs(docs: FlaskApiSpec):
 )
 @use_kwargs(PenjualanSOQuerySchema, location="query")
 def penjualan_so(**kwargs):
+    pass
+
+
+@doc(
+    tags=["Integration"],
+    summary="Ambil detail Penjualan Sales Order (SO) berdasarkan nomor SO",
+    description="Endpoint integrasi untuk mengambil detail data Penjualan SO beserta daftar item-nya berdasarkan no_so.",
+    params={
+        "X-API-Key": {
+            "description": "API Key untuk otentikasi integrasi",
+            "in": "header",
+            "type": "string",
+            "required": True,
+        },
+        "no_so": {
+            "description": "Nomor Sales Order (SO)",
+            "in": "path",
+            "type": "string",
+            "required": True,
+        },
+    },
+    responses={
+        200: {"description": "Detail Penjualan SO berhasil diambil"},
+        400: {"description": "Parameter nomor SO tidak valid"},
+        401: {"description": "API key tidak valid atau tidak disediakan"},
+        404: {"description": "Sales Order tidak ditemukan"},
+        500: {"description": "Kesalahan server internal"},
+        503: {"description": "Integration API key belum dikonfigurasi pada server"},
+    },
+)
+def penjualan_so_detail(no_so, **kwargs):
     pass
 
 
@@ -173,6 +205,7 @@ def create_integration_blueprint(
     available_columns,
     get_pembelian_data=None,
     available_pembelian_columns=None,
+    get_penjualan_so_by_no=None,
 ):
     integration = Blueprint("integration", __name__, url_prefix="/api/integration")
     pembelian_columns_set = available_pembelian_columns or []
@@ -250,6 +283,62 @@ def create_integration_blueprint(
         except Exception as e:
             print(f"Error api_integration_penjualan_so: {e}")
             return jsonify({"message": "Gagal mengambil data penjualan SO"}), 500
+
+    @integration.get("/penjualan-so/<path:no_so>")
+    @doc(
+        tags=["Integration"],
+        summary="Ambil detail Penjualan Sales Order (SO) berdasarkan nomor SO",
+        description="Endpoint integrasi untuk mengambil detail data Penjualan SO beserta daftar item-nya berdasarkan no_so.",
+        params={
+            "X-API-Key": {
+                "description": "API Key untuk otentikasi integrasi",
+                "in": "header",
+                "type": "string",
+                "required": True,
+            },
+            "no_so": {
+                "description": "Nomor Sales Order (SO)",
+                "in": "path",
+                "type": "string",
+                "required": True,
+            },
+        },
+        responses={
+            200: {"description": "Detail Penjualan SO berhasil diambil"},
+            400: {"description": "Parameter nomor SO tidak valid"},
+            401: {"description": "API key tidak valid atau tidak disediakan"},
+            404: {"description": "Sales Order tidak ditemukan"},
+            500: {"description": "Kesalahan server internal"},
+            503: {"description": "Integration API key belum dikonfigurasi pada server"},
+        },
+    )
+    def penjualan_so_detail(no_so, **kwargs):
+        if not api_keys:
+            return jsonify({"message": "Integration API key belum dikonfigurasi"}), 503
+        if not has_valid_api_key():
+            return jsonify({"message": "API key tidak valid"}), 401
+        if not get_penjualan_so_by_no:
+            return jsonify({"message": "Service data detail penjualan SO belum dikonfigurasi"}), 503
+
+        try:
+            requested_columns = [column.strip() for column in request.args.get("columns", "").split(",") if column.strip()]
+            invalid_columns = sorted(set(requested_columns) - set(available_columns))
+            if invalid_columns:
+                raise ValueError(f"columns tidak valid: {', '.join(invalid_columns)}")
+
+            result = get_penjualan_so_by_no(no_so)
+            if not result:
+                return jsonify({"message": f"Sales Order dengan nomor '{no_so}' tidak ditemukan"}), 404
+
+            columns = requested_columns or available_columns
+            if "items" in result:
+                result["items"] = [{column: row.get(column) for column in columns} for row in result["items"]]
+            return jsonify(result)
+        except ValueError as e:
+            return jsonify({"message": str(e)}), 400
+        except Exception as e:
+            print(f"Error api_integration_penjualan_so_detail: {e}")
+            return jsonify({"message": "Gagal mengambil detail data penjualan SO"}), 500
 
     @integration.get("/pembelian")
     @doc(
