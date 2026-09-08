@@ -7105,6 +7105,7 @@ def api_penerimaan_export():
 
 def _get_pembelian_data(options=None):
     options = options or request.args
+    no_po     = str(options.get("no_po", "") or "").strip()
     search    = str(options.get("search", "") or "").strip()
     date_from = str(options.get("date_from", "") or "").strip()
     date_to   = str(options.get("date_to", "") or "").strip()
@@ -7159,6 +7160,9 @@ def _get_pembelian_data(options=None):
 
         conditions   = ["1=1"]
         params_where = []
+        if no_po:
+            conditions.append("po.PONO = ?")
+            params_where.append(no_po)
         if search:
             conditions.append("""(
                 LOWER(po.PONO) CONTAINING LOWER(?) OR LOWER(pd.NAME) CONTAINING LOWER(?)
@@ -7229,12 +7233,7 @@ def _get_pembelian_data(options=None):
                 po.CASHDISCPC,
                 (SELECT SUM(
                     COALESCE(det_sum.QUANTITY, 0) * COALESCE(det_sum.UNITPRICE, 0) *
-                    (1 - (
-                        CASE
-                            WHEN TRIM(CAST(det_sum.ITEMDISCPC AS VARCHAR(32))) = '' THEN 0
-                            ELSE COALESCE(CAST(det_sum.ITEMDISCPC AS DOUBLE PRECISION), 0)
-                        END
-                    ) / 100)
+                    (1 - COALESCE({sql_number_expr("det_sum.ITEMDISCPC")}, 0) / 100)
                  )
                  FROM PODET det_sum
                  WHERE det_sum.POID = po.POID),
@@ -7330,6 +7329,34 @@ def _get_pembelian_data(options=None):
         }
     finally:
         con.close()
+
+
+def _get_pembelian_by_no(no_po, options=None):
+    no_po = str(no_po or "").strip()
+    if not no_po:
+        raise ValueError("no_po tidak boleh kosong")
+
+    options = dict(options or {})
+    options["no_po"] = no_po
+    options["offset"] = 0
+    options["limit"] = 1000
+    options["exclude_internal_so"] = "0"
+    result = _get_pembelian_data(options)
+    items = result.get("data", [])
+    if not items:
+        return None
+
+    return {
+        "no_po": items[0]["no_pembelian"],
+        "tgl_po": items[0]["tgl_pembelian"],
+        "tgl_ekspetasi": items[0]["tgl_ekspetasi"],
+        "no_pemasok": items[0]["no_pemasok"],
+        "nama_pemasok": items[0]["nama_pemasok"],
+        "top": items[0]["top"],
+        "total_amount": result.get("total_amount", 0),
+        "total_rows": len(items),
+        "items": items,
+    }
 
 
 @app.route("/api/pembelian")
@@ -7478,9 +7505,28 @@ def api_pembelian():
     except Exception as e:
         print(f"Error api_pembelian: {e}")
         return jsonify({"data": [], "total": 0, "total_rows": 0, "error": str(e)})
+
+
+@app.route("/api/pembelian/<path:no_po>", methods=["GET"])
+@jwt_required()
+def api_pembelian_by_no(no_po):
+    if not can_access_pembelian_request():
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        result = _get_pembelian_by_no(no_po, {
+            "include_payment": request.args.get("include_payment", "1"),
+            "exclude_internal_so": request.args.get("exclude_internal_so", "0"),
+        })
+        if not result:
+            return jsonify({"message": f"Purchase Order '{no_po}' tidak ditemukan"}), 404
+        if "items" in result:
+            result["items"] = filter_record_columns("pembelian", result["items"])
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
     except Exception as e:
-        print(f"Error api_pembelian: {e}")
-        return jsonify({"data": [], "total": 0, "error": str(e)})
+        print(f"Error api_pembelian_by_no: {e}")
+        return jsonify({"message": "Gagal mengambil data purchase order", "error": str(e)}), 500
 
 
 # ─── PENJUALAN ───────────────────────────────────────────────────────────────
@@ -9320,6 +9366,7 @@ app.register_blueprint(create_integration_blueprint(
     get_pembelian_data=_get_pembelian_data,
     available_pembelian_columns=MODULE_COLUMNS.get("pembelian", []),
     get_penjualan_so_by_no=_get_penjualan_so_by_no,
+    get_pembelian_by_no=_get_pembelian_by_no,
 ))
 register_integration_docs(docs)
 

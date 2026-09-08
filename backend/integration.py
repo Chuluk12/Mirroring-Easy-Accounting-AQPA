@@ -55,6 +55,7 @@ def register_integration_docs(docs: FlaskApiSpec):
     docs.register(penjualan_so, blueprint="integration")
     docs.register(penjualan_so_detail, blueprint="integration")
     docs.register(pembelian, blueprint="integration")
+    docs.register(pembelian_detail, blueprint="integration")
     docs.register(saved_reports, blueprint="integration")
     docs.register(saved_report_list, blueprint="integration")
 
@@ -143,6 +144,37 @@ def pembelian(**kwargs):
 
 @doc(
     tags=["Integration"],
+    summary="Ambil detail Pembelian (Purchase Order / PO) berdasarkan nomor PO",
+    description="Endpoint integrasi untuk mengambil detail data Pembelian / PO beserta daftar item-nya berdasarkan no_po.",
+    params={
+        "X-API-Key": {
+            "description": "API Key untuk otentikasi integrasi",
+            "in": "header",
+            "type": "string",
+            "required": True,
+        },
+        "no_po": {
+            "description": "Nomor Purchase Order (PO)",
+            "in": "path",
+            "type": "string",
+            "required": True,
+        },
+    },
+    responses={
+        200: {"description": "Detail Pembelian berhasil diambil"},
+        400: {"description": "Parameter nomor PO tidak valid"},
+        401: {"description": "API key tidak valid atau tidak disediakan"},
+        404: {"description": "Purchase Order tidak ditemukan"},
+        500: {"description": "Kesalahan server internal"},
+        503: {"description": "Integration API key belum dikonfigurasi pada server"},
+    },
+)
+def pembelian_detail(no_po, **kwargs):
+    pass
+
+
+@doc(
+    tags=["Integration"],
     summary="Ambil metadata Saved Reports",
     description="Endpoint integrasi untuk mengambil daftar metadata laporan tersimpan (saved reports) beserta permission/setting.",
     params={
@@ -206,6 +238,7 @@ def create_integration_blueprint(
     get_pembelian_data=None,
     available_pembelian_columns=None,
     get_penjualan_so_by_no=None,
+    get_pembelian_by_no=None,
 ):
     integration = Blueprint("integration", __name__, url_prefix="/api/integration")
     pembelian_columns_set = available_pembelian_columns or []
@@ -217,26 +250,6 @@ def create_integration_blueprint(
         return any(hmac.compare_digest(supplied_key, api_key) for api_key in api_keys)
 
     @integration.get("/penjualan-so")
-    @doc(
-        tags=["Integration"],
-        summary="Ambil data Penjualan Sales Order (SO)",
-        description="Endpoint integrasi untuk mengambil data Penjualan SO dengan pagination, filter tanggal/status/search, dan pemilihan kolom.",
-        params={
-            "X-API-Key": {
-                "description": "API Key untuk otentikasi integrasi",
-                "in": "header",
-                "type": "string",
-                "required": True,
-            }
-        },
-        responses={
-            200: {"description": "Data Penjualan SO berhasil diambil"},
-            400: {"description": "Parameter query tidak valid"},
-            401: {"description": "API key tidak valid atau tidak disediakan"},
-            500: {"description": "Kesalahan server internal"},
-            503: {"description": "Integration API key belum dikonfigurasi pada server"},
-        },
-    )
     @use_kwargs(PenjualanSOQuerySchema, location="query")
     def penjualan_so(**kwargs):
         if not api_keys:
@@ -285,33 +298,6 @@ def create_integration_blueprint(
             return jsonify({"message": "Gagal mengambil data penjualan SO"}), 500
 
     @integration.get("/penjualan-so/<path:no_so>")
-    @doc(
-        tags=["Integration"],
-        summary="Ambil detail Penjualan Sales Order (SO) berdasarkan nomor SO",
-        description="Endpoint integrasi untuk mengambil detail data Penjualan SO beserta daftar item-nya berdasarkan no_so.",
-        params={
-            "X-API-Key": {
-                "description": "API Key untuk otentikasi integrasi",
-                "in": "header",
-                "type": "string",
-                "required": True,
-            },
-            "no_so": {
-                "description": "Nomor Sales Order (SO)",
-                "in": "path",
-                "type": "string",
-                "required": True,
-            },
-        },
-        responses={
-            200: {"description": "Detail Penjualan SO berhasil diambil"},
-            400: {"description": "Parameter nomor SO tidak valid"},
-            401: {"description": "API key tidak valid atau tidak disediakan"},
-            404: {"description": "Sales Order tidak ditemukan"},
-            500: {"description": "Kesalahan server internal"},
-            503: {"description": "Integration API key belum dikonfigurasi pada server"},
-        },
-    )
     def penjualan_so_detail(no_so, **kwargs):
         if not api_keys:
             return jsonify({"message": "Integration API key belum dikonfigurasi"}), 503
@@ -341,26 +327,6 @@ def create_integration_blueprint(
             return jsonify({"message": "Gagal mengambil detail data penjualan SO"}), 500
 
     @integration.get("/pembelian")
-    @doc(
-        tags=["Integration"],
-        summary="Ambil data Pembelian (Purchase Order / PO)",
-        description="Endpoint integrasi untuk mengambil data Pembelian / PO dengan pagination, filter tanggal/status/tipe/search, response detail meta, total_amount, total_rows, dan total_so.",
-        params={
-            "X-API-Key": {
-                "description": "API Key untuk otentikasi integrasi",
-                "in": "header",
-                "type": "string",
-                "required": True,
-            }
-        },
-        responses={
-            200: {"description": "Data Pembelian berhasil diambil"},
-            400: {"description": "Parameter query tidak valid"},
-            401: {"description": "API key tidak valid atau tidak disediakan"},
-            500: {"description": "Kesalahan server internal"},
-            503: {"description": "Integration API key belum dikonfigurasi pada server"},
-        },
-    )
     @use_kwargs(PembelianQuerySchema, location="query")
     def pembelian(**kwargs):
         if not api_keys:
@@ -424,27 +390,37 @@ def create_integration_blueprint(
             print(f"Error api_integration_pembelian: {e}")
             return jsonify({"message": "Gagal mengambil data pembelian"}), 500
 
+    @integration.get("/pembelian/<path:no_po>")
+    def pembelian_detail(no_po, **kwargs):
+        if not api_keys:
+            return jsonify({"message": "Integration API key belum dikonfigurasi"}), 503
+        if not has_valid_api_key():
+            return jsonify({"message": "API key tidak valid"}), 401
+        if not get_pembelian_by_no:
+            return jsonify({"message": "Service data detail pembelian belum dikonfigurasi"}), 503
+
+        try:
+            requested_columns = [column.strip() for column in request.args.get("columns", "").split(",") if column.strip()]
+            if pembelian_columns_set and requested_columns:
+                invalid_columns = sorted(set(requested_columns) - set(pembelian_columns_set))
+                if invalid_columns:
+                    raise ValueError(f"columns tidak valid: {', '.join(invalid_columns)}")
+
+            result = get_pembelian_by_no(no_po)
+            if not result:
+                return jsonify({"message": f"Purchase Order dengan nomor '{no_po}' tidak ditemukan"}), 404
+
+            columns = requested_columns or pembelian_columns_set
+            if columns and "items" in result:
+                result["items"] = [{column: row.get(column) for column in columns} for row in result["items"]]
+            return jsonify(result)
+        except ValueError as e:
+            return jsonify({"message": str(e)}), 400
+        except Exception as e:
+            print(f"Error api_integration_pembelian_detail: {e}")
+            return jsonify({"message": "Gagal mengambil detail data pembelian"}), 500
+
     @integration.get("/v1/saved-reports")
-    @doc(
-        tags=["Integration"],
-        summary="Ambil metadata Saved Reports",
-        description="Endpoint integrasi untuk mengambil daftar metadata laporan tersimpan (saved reports) beserta permission/setting.",
-        params={
-            "X-API-Key": {
-                "description": "API Key untuk otentikasi integrasi",
-                "in": "header",
-                "type": "string",
-                "required": True,
-            }
-        },
-        responses={
-            200: {"description": "Metadata Saved Reports berhasil diambil"},
-            400: {"description": "Parameter query tidak valid"},
-            401: {"description": "API key tidak valid atau tidak disediakan"},
-            500: {"description": "Kesalahan server internal"},
-            503: {"description": "Integration API key belum dikonfigurasi pada server"},
-        },
-    )
     @use_kwargs(SavedReportsQuerySchema, location="query")
     def saved_reports(**kwargs):
         if not api_keys:
@@ -482,32 +458,6 @@ def create_integration_blueprint(
             return jsonify({"message": "Gagal mengambil metadata laporan tersimpan"}), 500
 
     @integration.get("/v1/saved-reports/<int:id_report>/list")
-    @doc(
-        tags=["Integration"],
-        summary="Ambil detail isi Saved Report berdasarkan ID",
-        description="Endpoint integrasi untuk mengambil record data isi dari Saved Report berdasarkan id_report.",
-        params={
-            "X-API-Key": {
-                "description": "API Key untuk otentikasi integrasi",
-                "in": "header",
-                "type": "string",
-                "required": True,
-            },
-            "id_report": {
-                "description": "ID Saved Report",
-                "in": "path",
-                "type": "integer",
-                "required": True,
-            },
-        },
-        responses={
-            200: {"description": "Data record Saved Report berhasil diambil"},
-            400: {"description": "Parameter query tidak valid"},
-            401: {"description": "API key tidak valid atau tidak disediakan"},
-            500: {"description": "Kesalahan server internal"},
-            503: {"description": "Integration API key belum dikonfigurasi pada server"},
-        },
-    )
     @use_kwargs(SavedReportListQuerySchema, location="query")
     def saved_report_list(id_report, **kwargs):
         if not api_keys:
