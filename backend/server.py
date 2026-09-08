@@ -7106,6 +7106,7 @@ def api_penerimaan_export():
 def _get_pembelian_data(options=None):
     options = options or request.args
     no_po     = str(options.get("no_po", "") or "").strip()
+    skip_count = str(options.get("skip_count", "")).lower() in ("1", "true", "yes")
     search    = str(options.get("search", "") or "").strip()
     date_from = str(options.get("date_from", "") or "").strip()
     date_to   = str(options.get("date_to", "") or "").strip()
@@ -7189,20 +7190,25 @@ def _get_pembelian_data(options=None):
 
         where_sql = " AND ".join(conditions)
 
-        cur.execute(f"""
-            SELECT COUNT(*), COUNT(DISTINCT po.POID), COUNT(DISTINCT det.ITEMRESERVED9)
-            FROM PO po
-            LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
-            LEFT JOIN PODET det     ON det.POID = po.POID
-            LEFT JOIN REQUISITION rq ON rq.REQID = det.REQID
-            LEFT JOIN REQUISITIONDET rd ON rd.REQID = det.REQID AND rd.SEQ = det.REQSEQ
-            LEFT JOIN TERMOPMT tm ON tm.TERMID = po.TERMID
-            WHERE {where_sql}
-        """, params_where)
-        count_res = cur.fetchone() or [0, 0, 0]
-        total_rows = int(count_res[0] or 0)
-        total_po = int(count_res[1] or 0)
-        total_so = int(count_res[2] or 0)
+        if skip_count:
+            total_rows = 0
+            total_po = 0
+            total_so = 0
+        else:
+            cur.execute(f"""
+                SELECT COUNT(*), COUNT(DISTINCT po.POID), COUNT(DISTINCT det.ITEMRESERVED9)
+                FROM PO po
+                LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
+                LEFT JOIN PODET det     ON det.POID = po.POID
+                LEFT JOIN REQUISITION rq ON rq.REQID = det.REQID
+                LEFT JOIN REQUISITIONDET rd ON rd.REQID = det.REQID AND rd.SEQ = det.REQSEQ
+                LEFT JOIN TERMOPMT tm ON tm.TERMID = po.TERMID
+                WHERE {where_sql}
+            """, params_where)
+            count_res = cur.fetchone() or [0, 0, 0]
+            total_rows = int(count_res[0] or 0)
+            total_po = int(count_res[1] or 0)
+            total_so = int(count_res[2] or 0)
 
         cur.execute(f"""
             SELECT FIRST ? SKIP ?
@@ -7259,15 +7265,15 @@ def _get_pembelian_data(options=None):
 
         data = []
         for row in rows:
-            qty = float(row[8] or 0); price = float(row[10] or 0)
-            disc_pc = float(row[11] or 0); tax_rate = float(row[14] or 0)
+            qty = _safe_float(row[8]); price = _safe_float(row[10])
+            disc_pc = _safe_float(row[11]); tax_rate = _safe_float(row[14])
             amounts = _purchase_amounts(qty, price, disc_pc, row[25] if len(row) > 25 else 0, row[23] if len(row) > 23 else 0, row[24] if len(row) > 24 else 0)
-            ppn_amt  = float(row[13] or 0) if row[12] and row[12].strip() else 0
+            ppn_amt  = _safe_float(row[13]) if row[12] and row[12].strip() else 0
             nilai_po = (
-                float(row[25] or 0)
-                + (float(row[26] or 0) if len(row) > 26 else 0)
-                + (float(row[27] or 0) if len(row) > 27 else 0)
-                + (float(row[28] or 0) if len(row) > 28 else 0)
+                _safe_float(row[25])
+                + (_safe_float(row[26]) if len(row) > 26 else 0)
+                + (_safe_float(row[27]) if len(row) > 27 else 0)
+                + (_safe_float(row[28]) if len(row) > 28 else 0)
             )
             poid = int(row[31] or 0) if len(row) > 31 else 0
             payment = payment_map.get(poid, {})
@@ -7304,8 +7310,8 @@ def _get_pembelian_data(options=None):
                 "diskon": amounts["diskon"],
                 "ppn_kode": str(row[12] or "").strip(), "ppn_rate": tax_rate,
                 "ppn_amount": round(ppn_amt, 2),
-                "pph": float(row[27] or 0) if len(row) > 27 else 0,
-                "add_cost": float(row[28] or 0) if len(row) > 28 else 0,
+                "pph": _safe_float(row[27]) if len(row) > 27 else 0,
+                "add_cost": _safe_float(row[28]) if len(row) > 28 else 0,
                 "dpp": amounts["dpp"],
                 "amount": amounts["amount"],
                 "nilai_po": round(nilai_po, 2),
@@ -7317,7 +7323,7 @@ def _get_pembelian_data(options=None):
                 "dibayar_fat": round(dibayar_fat, 2),
                 "sisa_hutang_fat": round(sisa_hutang_fat, 2),
                 "status_fat": status_fat,
-                "total_easy": round(float(row[25] or 0), 2) if len(row) > 25 else amounts["amount"],
+                "total_easy": round(_safe_float(row[25]), 2) if len(row) > 25 else amounts["amount"],
             })
 
         return {
@@ -7341,6 +7347,7 @@ def _get_pembelian_by_no(no_po, options=None):
     options["offset"] = 0
     options["limit"] = 1000
     options["exclude_internal_so"] = "0"
+    options["skip_count"] = "1"
     result = _get_pembelian_data(options)
     items = result.get("data", [])
     if not items:

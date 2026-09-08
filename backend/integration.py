@@ -250,7 +250,6 @@ def create_integration_blueprint(
         return any(hmac.compare_digest(supplied_key, api_key) for api_key in api_keys)
 
     @integration.get("/penjualan-so")
-    @use_kwargs(PenjualanSOQuerySchema, location="query")
     def penjualan_so(**kwargs):
         if not api_keys:
             return jsonify({"message": "Integration API key belum dikonfigurasi"}), 503
@@ -327,7 +326,6 @@ def create_integration_blueprint(
             return jsonify({"message": "Gagal mengambil detail data penjualan SO"}), 500
 
     @integration.get("/pembelian")
-    @use_kwargs(PembelianQuerySchema, location="query")
     def pembelian(**kwargs):
         if not api_keys:
             return jsonify({"message": "Integration API key belum dikonfigurasi"}), 503
@@ -421,7 +419,6 @@ def create_integration_blueprint(
             return jsonify({"message": "Gagal mengambil detail data pembelian"}), 500
 
     @integration.get("/v1/saved-reports")
-    @use_kwargs(SavedReportsQuerySchema, location="query")
     def saved_reports(**kwargs):
         if not api_keys:
             return jsonify({"message": "Integration API key belum dikonfigurasi"}), 503
@@ -458,7 +455,6 @@ def create_integration_blueprint(
             return jsonify({"message": "Gagal mengambil metadata laporan tersimpan"}), 500
 
     @integration.get("/v1/saved-reports/<int:id_report>/list")
-    @use_kwargs(SavedReportListQuerySchema, location="query")
     def saved_report_list(id_report, **kwargs):
         if not api_keys:
             return jsonify({"message": "Integration API key belum dikonfigurasi"}), 503
