@@ -37,7 +37,9 @@ export default function DetailProject() {
   const [exporting, setExporting] = useState(false)
   const [search, setSearch] = useState(initialProject)
   const [projectType, setProjectType] = useState(initialType)
-  const [dateRange, setDateRange] = useState(initialProject ? [null, null] : getDefaultDateRange)
+  // Detail project always starts with the reporting period requested by AQPA,
+  // including when this page is opened from a project deep-link.
+  const [dateRange, setDateRange] = useState(getDefaultDateRange)
   const [pagination, setPagination] = useState({ current: 1, pageSize: 50, total: 0 })
   const linkedProjectNo = searchParams.get('project') || ''
 

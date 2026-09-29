@@ -40,6 +40,7 @@ from integration import create_integration_blueprint, register_integration_docs
 from flask_apispec import FlaskApiSpec
 from apispec import APISpec
 from apispec.ext.marshmallow import MarshmallowPlugin
+from profit_loss_service_hpp import load_service_hpp_sources, apply_service_hpp
 
 if not hasattr(locale, "resetlocale"):
     def _resetlocale(category=locale.LC_ALL):
@@ -293,7 +294,7 @@ MODULE_COLUMNS = {
     ],
     "profit_loss": [
         "no_faktur", "no_do", "no_so", "tgl_faktur", "no_barang", "deskripsi_barang",
-        "qty_faktur", "uom", "harga_satuan", "jumlah", "nilai_hpp",
+        "qty_faktur", "uom", "harga_satuan", "jumlah", "nilai_hpp", "hpp_reference",
         "delivery", "delivery_details", "delivery_ju", "delivery_ju_details",
         "cf", "cf_pct", "cf_details", "mf", "mf_pct", "mf_details",
         "biaya_project", "biaya_project_details", "total_biaya", "laba_operasi",
@@ -444,6 +445,11 @@ def filter_record_columns(module, rows, user=None):
     if not allowed:
         return rows
     allowed_set = set(allowed) | set(MODULE_REQUIRED_RESPONSE_KEYS.get(module, []))
+    if module == "profit_loss":
+        if "nilai_hpp" in allowed_set:
+            allowed_set.add("hpp_reference")
+        else:
+            allowed_set.discard("hpp_reference")
     return [{key: value for key, value in row.items() if key in allowed_set} for row in rows]
 
 
@@ -13898,6 +13904,10 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search="", marketing=
                 "no_barang": line.get("no_barang", ""),
                 "deskripsi_barang": line.get("deskripsi_barang", ""),
                 "qty_faktur": round(float(line.get("qty_faktur") or 0), 4),
+                # A monetary discount/tax conversion does not reduce the repair quantity.
+                "_service_hpp_qty": float(
+                    source_lines[line_index].get("qty_faktur") or 0
+                ) if invoice_cash_discount > 0 or invoice.get("inclusive_tax") else float(line.get("qty_faktur") or 0),
                 "uom": line.get("uom", ""),
                 "harga_satuan": round(float(line.get("harga_satuan") or 0), 2),
                 "jumlah": round(float(line.get("jumlah") or 0), 2),
@@ -13921,6 +13931,9 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search="", marketing=
                 "sumber": line.get("sumber", "Faktur Penjualan"),
             }
             data.append(result)
+
+    service_orders, service_receipts = load_service_hpp_sources(cur, data)
+    apply_service_hpp(data, service_orders, service_receipts)
 
     marketing_filter = str(marketing or "").strip().upper()
     if marketing_filter:
@@ -14029,7 +14042,12 @@ PROFIT_LOSS_EXPORT_COLUMNS = {
 
 def _profit_loss_export_rows(rows):
     return [
-        {key: row.get(key) for key in PROFIT_LOSS_EXPORT_COLUMNS}
+        {
+            **{key: row.get(key) for key in PROFIT_LOSS_EXPORT_COLUMNS},
+            "hpp_source": (row.get("hpp_reference") or {}).get("source", "HPP Easy"),
+            "hpp_note": (row.get("hpp_reference") or {}).get("reason", ""),
+            "hpp_easy": (row.get("hpp_reference") or {}).get("hpp_easy", row.get("nilai_hpp")),
+        }
         for row in rows
     ]
 
@@ -19586,6 +19604,14 @@ def _project_detail_replace_hpp_gl_rows(data, virtual_rows):
     ]
 
 
+def _project_detail_date_range():
+    """Use the standard reporting period when the client omits either bound."""
+    return (
+        request.args.get("date_from") or "2025-01-01",
+        request.args.get("date_to") or datetime.now().date().isoformat(),
+    )
+
+
 @app.route("/api/project/detail")
 @jwt_required()
 def api_project_detail():
@@ -19593,8 +19619,7 @@ def api_project_detail():
         return jsonify({"message": "Akses ditolak"}), 403
     try:
         search = request.args.get("search", "")
-        date_from = request.args.get("date_from", "")
-        date_to = request.args.get("date_to", "")
+        date_from, date_to = _project_detail_date_range()
         project_type = request.args.get("project_type", "").lower()
         project_no = request.args.get("project_no", "")
         account_no = request.args.get("account_no", "").strip()
@@ -19667,8 +19692,7 @@ def api_project_detail_export():
         return jsonify({"message": "Akses ditolak"}), 403
     try:
         search = request.args.get("search", "")
-        date_from = request.args.get("date_from", "")
-        date_to = request.args.get("date_to", "")
+        date_from, date_to = _project_detail_date_range()
         project_type = request.args.get("project_type", "").lower()
         project_no = request.args.get("project_no", "")
         account_no = request.args.get("account_no", "").strip()

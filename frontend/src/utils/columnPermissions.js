@@ -14,5 +14,5 @@ export function filterExportColumnsByPermission(module, columns, user) {
   if (!allowed || allowed.length === 0) return columns
 
   const allowedSet = new Set(allowed)
-  return columns.filter(column => allowedSet.has(column.key))
+  return columns.filter(column => allowedSet.has(column.permissionKey || column.key))
 }

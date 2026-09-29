@@ -184,6 +184,39 @@ function DeliveryReferenceCell({ value, details = [], color, type, fallbackTitle
   )
 }
 
+function HppReferenceCell({ value, reference }) {
+  if (!reference) return <Text style={{ color: '#ff7a00' }}>{formatCurrency(value)}</Text>
+  const needsReview = reference.status === 'review'
+  const content = (
+    <div style={{ width: 420, maxHeight: 360, overflowY: 'auto' }}>
+      <Tag color={needsReview ? 'orange' : 'green'}>{reference.source}</Tag>
+      <div><Text type="secondary">SO: </Text><Text code>{reference.no_so || '-'}</Text></div>
+      <div><Text type="secondary">HPP Easy sebelum koreksi: </Text>{formatCurrency(reference.hpp_easy)}</div>
+      {needsReview ? <Text type="warning">{reference.reason} Nilai HPP Easy masih digunakan.</Text> : <>
+        <div><Text type="secondary">Total biaya penerimaan: </Text>{formatCurrency(reference.total_biaya_penerimaan)}</div>
+        <div><Text type="secondary">Alokasi kuantitas: </Text>{formatQty(reference.qty_baris)} / {formatQty(reference.qty_so)} dari SO</div>
+        <div><Text type="secondary">HPP baris ini: </Text><Text strong>{formatCurrency(reference.nilai_alokasi)}</Text></div>
+        {reference.details?.map((detail, index) => (
+          <div key={`${detail.no_penerimaan}-${index}`} style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #f0f0f0' }}>
+            <div><Text type="secondary">PO: </Text><Text code>{detail.no_po}</Text></div>
+            <div><Text type="secondary">Penerimaan: </Text><Text code>{detail.no_penerimaan}</Text></div>
+            <div>{detail.tanggal} | Qty dasar: {formatQty(detail.qty_dasar)}</div>
+            <div><Text type="secondary">Biaya aktual: </Text>{formatCurrency(detail.nilai)}</div>
+          </div>
+        ))}
+      </>}
+    </div>
+  )
+  return (
+    <Popover title="Rincian Nilai HPP" content={content} trigger="click" placement="left">
+      <Button type="link" onClick={event => event.stopPropagation()} style={{ height: 'auto', padding: 0, textAlign: 'right' }}>
+        <div><Text style={{ color: '#ff7a00' }}>{formatCurrency(value)}</Text></div>
+        <Text type={needsReview ? 'warning' : 'secondary'} style={{ fontSize: 11 }}>{needsReview ? 'HPP perlu diperiksa' : 'Pembelian per SO'}</Text>
+      </Button>
+    </Popover>
+  )
+}
+
 function ProjectCostReferenceCell({ value, details = [], record }) {
   const color = '#d46b08'
   const [lookupDetails, setLookupDetails] = useState([])
@@ -311,6 +344,9 @@ const EXPORT_COLUMNS = [
   { key: 'harga_satuan', label: 'Harga Satuan', type: 'currency' },
   { key: 'jumlah', label: 'Jumlah', type: 'currency' },
   { key: 'nilai_hpp', label: 'Nilai HPP', type: 'currency' },
+  { key: 'hpp_source', label: 'Sumber HPP', permissionKey: 'nilai_hpp' },
+  { key: 'hpp_note', label: 'Catatan HPP', permissionKey: 'nilai_hpp' },
+  { key: 'hpp_easy', label: 'HPP Easy Sebelum Koreksi', type: 'currency', permissionKey: 'nilai_hpp' },
   { key: 'gross_profit', label: 'Gross Profit', type: 'currency' },
   { key: 'delivery', label: 'Delivery Purch', type: 'currency' },
   { key: 'delivery_ju', label: 'Delivery JU', type: 'currency' },
@@ -459,7 +495,7 @@ export default function ProfitLoss() {
     { title: 'Kts Faktur', dataIndex: 'qty_faktur', width: 110, align: 'right', render: formatQty },
     { title: 'Harga Satuan', dataIndex: 'harga_satuan', width: 145, align: 'right', render: formatCurrency },
     { title: 'Jumlah', dataIndex: 'jumlah', width: 145, align: 'right', render: formatCurrency },
-    { title: 'Nilai HPP', dataIndex: 'nilai_hpp', width: 145, align: 'right', render: value => <Text style={{ color: '#ff7a00' }}>{formatCurrency(value)}</Text> },
+    { title: 'Nilai HPP', dataIndex: 'nilai_hpp', width: 170, align: 'right', render: (value, record) => <HppReferenceCell value={value} reference={record.hpp_reference} /> },
     {
       title: 'Gross Profit',
       dataIndex: 'gross_profit',
@@ -549,7 +585,7 @@ export default function ProfitLoss() {
     <div>
       <Title level={3} style={{ marginBottom: 4 }}>Profit & Loss (Laba & Rugi)</Title>
       <Space size={8} wrap>
-        <Text type="secondary">Gross Profit dihitung dari Jumlah penjualan dikurangi Nilai HPP jurnal.</Text>
+        <Text type="secondary">Gross Profit = Jumlah penjualan − Nilai HPP. HPP JASA-REPAIR menggunakan penerimaan pembelian terkait SO jika referensinya sesuai. Klik nilai HPP untuk melihat sumbernya.</Text>
         <Tag color="blue">Periode aktif: {formatPeriod(activeDateRange)}</Tag>
       </Space>
 
