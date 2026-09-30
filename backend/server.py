@@ -8308,7 +8308,8 @@ def _so_line_closed_expr(cur):
 def _so_select_sql(line_closed_expr):
     return f"""
         {_SO_SELECT},
-        {line_closed_expr} AS LINE_CLOSED
+        {line_closed_expr} AS LINE_CLOSED,
+        so.SHIPTO2, so.SHIPTO3, so.SHIPTO4, so.SHIPTO5
     """
 
 
@@ -8329,6 +8330,7 @@ def _so_where_clause(search, date_from, date_to, status, line_closed_expr="COALE
     conditions = ["det.ITEMNO IS NOT NULL"]
     params = []
 
+    search = str(search or "").strip()
     if search:
         conditions.append("""(
             LOWER(so.SONO)            CONTAINING LOWER(?)
@@ -8337,7 +8339,7 @@ def _so_where_clause(search, date_from, date_to, status, line_closed_expr="COALE
             OR LOWER(det.ITEMNO)      CONTAINING LOWER(?)
             OR LOWER(det.ITEMOVDESC)  CONTAINING LOWER(?)
             OR LOWER(i.RESERVED9)     CONTAINING LOWER(?)
-            OR (LOWER(?) = 'non gte' AND (
+            OR (CAST(? AS VARCHAR(255)) = 'non gte' AND (
                 NULLIF(TRIM(i.RESERVED9), '') IS NULL
                 OR (
                     UPPER(TRIM(i.RESERVED9)) CONTAINING 'TANPA'
@@ -8345,7 +8347,7 @@ def _so_where_clause(search, date_from, date_to, status, line_closed_expr="COALE
                 )
             ))
         )""")
-        params += [search, search, search, search, search, search, search]
+        params += [search, search, search, search, search, search, "non gte" if search.casefold() == "non gte" else ""]
 
     if date_from:
         conditions.append("so.SODATE >= ?")
@@ -8374,6 +8376,22 @@ def _so_where_clause(search, date_from, date_to, status, line_closed_expr="COALE
             conditions.append("1 = 0")
 
     return " AND ".join(conditions), params
+
+
+def _so_shipping_address(parts):
+    """Keep destination/address lines, excluding phone-only contact lines."""
+    lines = []
+    for part in parts:
+        for line in str(part or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if re.match(r"^(?:tel(?:epon|p|p\.)?|phone|fax|hp|wa|whatsapp)\s*[:.\-]?\s*\+?\d", line, re.I):
+                continue
+            if re.fullmatch(r"[+\d\s()./\-]+", line) and len(re.sub(r"\D", "", line)) >= 7:
+                continue
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def _build_so_rows(rows, delivery_map=None):
@@ -8445,7 +8463,7 @@ def _build_so_rows(rows, delivery_map=None):
             "no_pengiriman":    delivery.get("no_pengiriman", ""),
             "tgl_pengiriman":   delivery.get("tgl_pengiriman", ""),
             "status":           status_label,
-            "shipto":           str(row[15] or "").strip(),
+            "shipto":           _so_shipping_address([row[15], *row[30:34]]),
             "glperiod":         int(row[16] or 0),
             "glyear":           int(row[17] or 0),
             "invamount":        float(row[18] or 0),
@@ -9347,7 +9365,7 @@ def api_penjualan_so():
         return jsonify(result)
     except Exception as e:
         print(f"Error api_penjualan_so: {e}")
-        return jsonify({"data": [], "total_rows": 0, "total_so": 0, "error": str(e)})
+        return jsonify({"data": [], "total_rows": 0, "total_so": 0, "error": str(e)}), 500
 
 
 @app.route("/api/penjualan-so/<path:so_no>", methods=["GET"])

@@ -8,7 +8,7 @@ import {
   FileExcelOutlined, FileDoneOutlined, LoadingOutlined,
   CalendarOutlined, ArrowUpOutlined, ArrowDownOutlined, AimOutlined, PauseCircleOutlined
 } from '@ant-design/icons'
-import api from '../../api/client'
+import api, { getApiErrorMessage } from '../../api/client'
 import { exportRowsToXLS } from '../../utils/exportXls'
 import { withTableSorters } from '../../utils/tableSorters'
 import { useAuth } from '../../context/AuthContext'
@@ -309,8 +309,17 @@ function TabSO() {
   const pageRef = useRef(1)
   const pageSizeRef = useRef(20)
   const didMountRef = useRef(false)
+  const requestIdRef = useRef(0)
 
   const fetchData = useCallback(async (page = 1, pageSize = 20, sv = '', dates = [null, null], stat = '', showLoading = true, holdStat = holdRef.current) => {
+    const requestId = ++requestIdRef.current
+    sv = sv.trim()
+    pageRef.current = page
+    pageSizeRef.current = pageSize
+    searchRef.current = sv
+    dateRangeRef.current = dates
+    statusRef.current = stat
+    holdRef.current = holdStat
     if (showLoading) setLoading(true)
     try {
       const params = { offset: (page - 1) * pageSize, limit: pageSize }
@@ -323,6 +332,8 @@ function TabSO() {
       const res  = await api.get(`/api/penjualan-so`, {
         params, headers: { Authorization: `Bearer ${token}` },
       })
+      if (requestId !== requestIdRef.current) return
+      if (res.data.error) throw new Error(res.data.error)
       const rows = res.data.data || []
       setData(rows)
       setPagination(prev => ({
@@ -336,8 +347,14 @@ function TabSO() {
       dateRangeRef.current = dates
       statusRef.current = stat
       holdRef.current = holdStat
-    } catch (e) { console.error('Error fetch SO:', e) }
-    finally { if (showLoading) setLoading(false) }
+    } catch (e) {
+      if (requestId === requestIdRef.current) {
+        console.error('Error fetch SO:', e)
+        if (showLoading) message.error(e.response || e.code ? getApiErrorMessage(e) : e.message)
+      }
+    } finally {
+      if (requestId === requestIdRef.current) setLoading(false)
+    }
   }, [token])
 
   useEffect(() => {
@@ -355,7 +372,7 @@ function TabSO() {
     }
 
     const timer = setTimeout(() => {
-      if (search !== searchRef.current) {
+      if (search.trim() !== searchRef.current) {
         fetchData(1, pageSizeRef.current, search, dateRangeRef.current, statusRef.current)
       }
     }, 450)
@@ -565,7 +582,7 @@ function TabSO() {
     { key: 'nama_pelanggan', label: 'Nama Pelanggan' },
     { key: 'no_po_customer', label: 'No PO Customer' },
     { key: 'nama_salesman', label: 'Salesman' },
-    { key: 'shipto', label: 'Kirim Ke' },
+    { key: 'shipto', label: 'Kirim Ke', render: v => <span style={{ whiteSpace: 'pre-line' }}>{v || '-'}</span> },
     { key: 'deskripsi_so', label: 'Keterangan' },
   ]
   const detailColumns = [
