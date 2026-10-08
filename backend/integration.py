@@ -1,5 +1,6 @@
 import hmac
 import math
+from datetime import datetime
 
 from apispec import APISpec
 from apispec.ext.marshmallow import MarshmallowPlugin
@@ -18,6 +19,32 @@ class PenjualanSOQuerySchema(Schema):
     columns = fields.Str(load_default="", metadata={"description": "Daftar kolom dipisahkan koma"})
     sortby = fields.Str(load_default="tgl_so", metadata={"description": "Kolom sorting"})
     sort_order = fields.Str(load_default="desc", metadata={"description": "Urutan sorting (asc/desc)"})
+
+
+class PenjualanSOItemOrientedHeaderQuerySchema(Schema):
+    limit = fields.Int(load_default=100, metadata={"description": "Jumlah SO per halaman (1-500)"})
+    page = fields.Int(load_default=1, metadata={"description": "Nomor halaman (minimal 1)"})
+    offset = fields.Int(load_default=None, metadata={"description": "Offset data (0-based)"})
+    search = fields.Str(load_default="", metadata={"description": "Kata kunci pencarian"})
+    date_from = fields.Str(load_default="", metadata={"description": "Tanggal mulai (YYYY-MM-DD)"})
+    date_to = fields.Str(load_default="", metadata={"description": "Tanggal selesai (YYYY-MM-DD)"})
+
+
+class PenjualanSOItemOrientedItemQuerySchema(PenjualanSOItemOrientedHeaderQuerySchema):
+    no_so = fields.Str(load_default="", metadata={"description": "Filter exact nomor SO"})
+    status = fields.Str(load_default="", metadata={"description": "Status item: waiting, process, received, closed"})
+
+
+SO_HEADER_COLUMNS = (
+    "Tanggal SO", "Under", "Penjual", "No. Customer", "Nama Customer",
+    "No. SO", "No. PO", "Nilai SO", "Status", "Catatan",
+)
+SO_ITEM_COLUMNS = (
+    "Tanggal SO", "Under", "Penjual", "No. Customer", "Nama Customer",
+    "No. SO", "No. PO", "No. Barang", "Deskripsi Barang", "Kuantitas",
+    "Satuan", "Nilai Item", "Kategori Produk", "Jenis Produk",
+    "Tipe Pelanggan", "Status",
+)
 
 
 class PembelianQuerySchema(Schema):
@@ -58,6 +85,8 @@ def register_integration_docs(docs: FlaskApiSpec):
     docs.register(pembelian_detail, blueprint="integration")
     docs.register(saved_reports, blueprint="integration")
     docs.register(saved_report_list, blueprint="integration")
+    docs.register(penjualan_item_oriented_header_so, blueprint="integration")
+    docs.register(penjualan_item_oriented_item_so, blueprint="integration")
 
 
 # Views defined at module level for flask-apispec doc inspection
@@ -114,6 +143,40 @@ def penjualan_so(**kwargs):
     },
 )
 def penjualan_so_detail(no_so, **kwargs):
+    pass
+
+
+@doc(
+    tags=["Integration"],
+    summary="Ambil SO Header item-oriented",
+    params={
+        "X-API-Key": {
+            "description": "API Key untuk otentikasi integrasi",
+            "in": "header",
+            "type": "string",
+            "required": True,
+        }
+    },
+)
+@use_kwargs(PenjualanSOItemOrientedHeaderQuerySchema, location="query")
+def penjualan_item_oriented_header_so(**kwargs):
+    pass
+
+
+@doc(
+    tags=["Integration"],
+    summary="Ambil Item SO item-oriented",
+    params={
+        "X-API-Key": {
+            "description": "API Key untuk otentikasi integrasi",
+            "in": "header",
+            "type": "string",
+            "required": True,
+        }
+    },
+)
+@use_kwargs(PenjualanSOItemOrientedItemQuerySchema, location="query")
+def penjualan_item_oriented_item_so(**kwargs):
     pass
 
 
@@ -239,6 +302,8 @@ def create_integration_blueprint(
     available_pembelian_columns=None,
     get_penjualan_so_by_no=None,
     get_pembelian_by_no=None,
+    get_penjualan_so_item_oriented_header=None,
+    get_penjualan_so_item_oriented_item=None,
 ):
     integration = Blueprint("integration", __name__, url_prefix="/api/integration")
     pembelian_columns_set = available_pembelian_columns or []
@@ -324,6 +389,72 @@ def create_integration_blueprint(
         except Exception as e:
             print(f"Error api_integration_penjualan_so_detail: {e}")
             return jsonify({"message": "Gagal mengambil detail data penjualan SO"}), 500
+
+    def so_item_oriented_resource(resource, columns, grain, getter):
+        if not api_keys:
+            return jsonify({"message": "Integration API key belum dikonfigurasi"}), 503
+        if not has_valid_api_key():
+            return jsonify({"message": "API key tidak valid"}), 401
+        if not getter:
+            return jsonify({"message": "Service item-oriented penjualan SO belum dikonfigurasi"}), 503
+
+        try:
+            limit = int(request.args.get("limit", 100))
+            page = int(request.args.get("page", 1))
+            offset = int(request.args.get("offset", (page - 1) * limit))
+            if page < 1 or not 1 <= limit <= 500:
+                raise ValueError("page minimal 1 dan limit harus antara 1-500")
+
+            result = getter({
+                "search": request.args.get("search", ""),
+                "date_from": request.args.get("date_from", ""),
+                "date_to": request.args.get("date_to", ""),
+                "no_so": request.args.get("no_so", ""),
+                "status": request.args.get("status", ""),
+                "offset": offset,
+                "limit": limit,
+            })
+            total = result["total"]
+            generated_at = datetime.now().astimezone().isoformat()
+            return jsonify({
+                "success": True,
+                "api_version": "v1",
+                "resource": resource,
+                "generated_at": generated_at,
+                "data": result["data"],
+                "meta": {
+                    "offset": offset,
+                    "page": (offset // limit) + 1,
+                    "limit": limit,
+                    "count": len(result["data"]),
+                    "total": total,
+                    "total_page": math.ceil(total / limit) if total else 0,
+                    "has_more": offset + len(result["data"]) < total,
+                    "date_getting_data": generated_at,
+                    "date_from": request.args.get("date_from", ""),
+                    "date_to": request.args.get("date_to", ""),
+                },
+                "schema": {"columns": list(columns), "grain": grain},
+            })
+        except ValueError as e:
+            return jsonify({"message": str(e)}), 400
+        except Exception as e:
+            print(f"Error api_integration_{resource}: {e}")
+            return jsonify({"message": "Gagal mengambil data item-oriented penjualan SO"}), 500
+
+    @integration.get("/v1/penjualan-item-oriented/header-so")
+    def penjualan_item_oriented_header_so(**kwargs):
+        return so_item_oriented_resource(
+            "penjualan-item-oriented-header", SO_HEADER_COLUMNS,
+            "one row per Sales Order", get_penjualan_so_item_oriented_header,
+        )
+
+    @integration.get("/v1/penjualan-item-oriented/item-so")
+    def penjualan_item_oriented_item_so(**kwargs):
+        return so_item_oriented_resource(
+            "penjualan-item-oriented-item", SO_ITEM_COLUMNS,
+            "one row per Sales Order item", get_penjualan_so_item_oriented_item,
+        )
 
     @integration.get("/pembelian")
     def pembelian(**kwargs):

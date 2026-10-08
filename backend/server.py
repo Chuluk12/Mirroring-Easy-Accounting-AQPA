@@ -9131,6 +9131,126 @@ def _get_penjualan_so_by_no(so_no):
         con.close()
 
 
+def _get_penjualan_so_item_oriented_rows(resource, options=None):
+    options = options or request.args
+    search = options.get("search", "")
+    date_from = options.get("date_from", "")
+    date_to = options.get("date_to", "")
+    status = options.get("status", "") if resource.endswith("-item") else ""
+    no_so = options.get("no_so", "") if resource.endswith("-item") else ""
+    offset = int(options.get("offset", 0))
+    limit = int(options.get("limit", 20))
+    if offset < 0 or not 1 <= limit <= 500:
+        raise ValueError("offset minimal 0 dan limit harus antara 1-500")
+
+    con = fdb.connect(**DB_CONFIG)
+    try:
+        cur = con.cursor()
+        line_closed_expr = _so_line_closed_expr(cur)
+        where_sql, params_where = _so_import_where_clause(
+            resource, search, date_from, date_to, no_so, status, line_closed_expr
+        )
+
+        if resource.endswith("-header"):
+            cur.execute(f"SELECT COUNT(*) FROM (SELECT so.SOID {_SO_FROM} WHERE {where_sql} GROUP BY so.SOID)", params_where)
+            total = int((cur.fetchone() or [0])[0] or 0)
+            cur.execute(f"""
+                SELECT FIRST ? SKIP ? so.SODATE, COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, ''),
+                    pd.PERSONNO, pd.NAME, so.SONO, so.PONO,
+                    SUM(COALESCE(det.QUANTITY, 0) * COALESCE(det.UNITPRICE, 0)
+                        * (1 - COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
+                        + COALESCE(det.QUANTITY, 0) * COALESCE(det.UNITPRICE, 0)
+                        * (1 - COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100) * COALESCE(so.TAX1RATE, 0) / 100),
+                    CASE
+                        WHEN SUM(CASE WHEN COALESCE(det.QUANTITY, 0) > 0
+                                      AND COALESCE(det.QTYSHIPPED, 0) >= COALESCE(det.QUANTITY, 0)
+                                 THEN 1 ELSE 0 END) = COUNT(*) THEN 'Diterima'
+                        WHEN SUM(CASE WHEN {line_closed_expr} <> 0 THEN 1 ELSE 0 END) = COUNT(*) THEN 'Ditutup'
+                        WHEN SUM(CASE WHEN COALESCE(det.QTYSHIPPED, 0) > 0 THEN 1 ELSE 0 END) > 0 THEN 'Diproses'
+                        ELSE 'Menunggu'
+                    END,
+                    so.DESCRIPTION
+                {_SO_FROM}
+                WHERE {where_sql}
+                GROUP BY so.SOID, so.SODATE, sm.FIRSTNAME, sm.LASTNAME,
+                    pd.PERSONNO, pd.NAME, so.SONO, so.PONO, so.DESCRIPTION
+                ORDER BY so.SODATE DESC, so.SONO
+            """, [limit, offset] + params_where)
+            data = [{
+                "Tanggal SO": row[0], "Under": "AQPA", "Penjual": str(row[1] or "").strip(),
+                "No. Customer": str(row[2] or "").strip(), "Nama Customer": str(row[3] or "").strip(),
+                "No. SO": str(row[4] or "").strip(), "No. PO": str(row[5] or "").strip(),
+                "Nilai SO": float(row[6] or 0), "Status": str(row[7] or ""), "Catatan": str(row[8] or "").strip(),
+            } for row in cur.fetchall()]
+        else:
+            cur.execute(f"SELECT COUNT(*) {_SO_FROM} WHERE {where_sql}", params_where)
+            total = int((cur.fetchone() or [0])[0] or 0)
+            cur.execute(f"""
+                SELECT FIRST ? SKIP ? so.SODATE, COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, ''),
+                    pd.PERSONNO, pd.NAME, so.SONO, so.PONO, det.ITEMNO,
+                    COALESCE(det.ITEMOVDESC, i.ITEMDESCRIPTION), det.QUANTITY, det.ITEMUNIT,
+                    det.QUANTITY * det.UNITPRICE * (1 - COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
+                        * (1 + COALESCE(so.TAX1RATE, 0) / 100), i.RESERVED9, i.ITEMTYPE,
+                    COALESCE(c.NAME, i.RESERVED9), ct.TYPENAME,
+                    CASE WHEN COALESCE(det.QUANTITY, 0) > 0 AND COALESCE(det.QTYSHIPPED, 0) >= COALESCE(det.QUANTITY, 0) THEN 'Diterima'
+                         WHEN {line_closed_expr} <> 0 THEN 'Ditutup'
+                         WHEN COALESCE(det.QTYSHIPPED, 0) > 0 THEN 'Diproses' ELSE 'Menunggu' END
+                {_SO_FROM}
+                LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+                LEFT JOIN CUSTTYPE ct ON ct.CUSTOMERTYPEID = pd.CUSTOMERTYPEID
+                WHERE {where_sql}
+                ORDER BY so.SODATE DESC, so.SONO, det.SEQ
+            """, [limit, offset] + params_where)
+            data = [{
+                "Tanggal SO": row[0], "Under": "AQPA", "Penjual": str(row[1] or "").strip(),
+                "No. Customer": str(row[2] or "").strip(), "Nama Customer": str(row[3] or "").strip(),
+                "No. SO": str(row[4] or "").strip(), "No. PO": str(row[5] or "").strip(),
+                "No. Barang": str(row[6] or "").strip(), "Deskripsi Barang": str(row[7] or "").strip(),
+                "Kuantitas": float(row[8] or 0), "Satuan": str(row[9] or "").strip(),
+                "Nilai Item": float(row[10] or 0), "Kategori Produk": str(row[13] or row[11] or "").strip(),
+                "Jenis Produk": {0: "Barang", 1: "Jasa"}.get(int(row[12] or 0), str(row[12] or "")),
+                "Tipe Pelanggan": str(row[14] or "").strip(), "Status": str(row[15] or ""),
+            } for row in cur.fetchall()]
+        return {"data": data, "total": total}
+    finally:
+        con.close()
+
+
+def _so_import_where_clause(resource, search, date_from, date_to, no_so, status, line_closed_expr):
+    conditions = ["det.ITEMNO IS NOT NULL"]
+    params = []
+    if search:
+        conditions.append("(LOWER(so.SONO) CONTAINING LOWER(?) OR LOWER(pd.PERSONNO) CONTAINING LOWER(?) OR LOWER(pd.NAME) CONTAINING LOWER(?) OR LOWER(so.PONO) CONTAINING LOWER(?) OR LOWER(det.ITEMNO) CONTAINING LOWER(?) OR LOWER(det.ITEMOVDESC) CONTAINING LOWER(?))")
+        params.extend([search] * 6)
+    if date_from:
+        conditions.append("so.SODATE >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("so.SODATE <= ?")
+        params.append(date_to)
+    if resource.endswith("-item") and no_so:
+        conditions.append("UPPER(TRIM(so.SONO)) = UPPER(?)")
+        params.append(no_so)
+    if resource.endswith("-item") and status:
+        status_conditions = {
+            "waiting": f"COALESCE(det.QTYSHIPPED, 0) <= 0 AND {line_closed_expr} = 0",
+            "process": f"COALESCE(det.QTYSHIPPED, 0) > 0 AND COALESCE(det.QTYSHIPPED, 0) < COALESCE(det.QUANTITY, 0) AND {line_closed_expr} = 0",
+            "received": "COALESCE(det.QUANTITY, 0) > 0 AND COALESCE(det.QTYSHIPPED, 0) >= COALESCE(det.QUANTITY, 0)",
+            "closed": f"{line_closed_expr} <> 0",
+        }
+        if status in status_conditions:
+            conditions.append(status_conditions[status])
+    return " AND ".join(conditions), params
+
+
+def _get_penjualan_so_item_oriented_header(options=None):
+    return _get_penjualan_so_item_oriented_rows("penjualan-item-oriented-header", options)
+
+
+def _get_penjualan_so_item_oriented_item(options=None):
+    return _get_penjualan_so_item_oriented_rows("penjualan-item-oriented-item", options)
+
+
 def _json_value(value):
     if isinstance(value, Decimal):
         return float(value)
@@ -9398,6 +9518,8 @@ app.register_blueprint(create_integration_blueprint(
     available_pembelian_columns=MODULE_COLUMNS.get("pembelian", []),
     get_penjualan_so_by_no=_get_penjualan_so_by_no,
     get_pembelian_by_no=_get_pembelian_by_no,
+    get_penjualan_so_item_oriented_header=_get_penjualan_so_item_oriented_header,
+    get_penjualan_so_item_oriented_item=_get_penjualan_so_item_oriented_item,
 ))
 register_integration_docs(docs)
 
