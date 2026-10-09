@@ -9131,6 +9131,14 @@ def _get_penjualan_so_by_no(so_no):
         con.close()
 
 
+def _format_integration_date(value):
+    if value is None:
+        return None
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    return str(value)[:10]
+
+
 def _get_penjualan_so_item_oriented_rows(resource, options=None):
     options = options or request.args
     search = options.get("search", "")
@@ -9177,7 +9185,7 @@ def _get_penjualan_so_item_oriented_rows(resource, options=None):
                 ORDER BY so.SODATE DESC, so.SONO
             """, [limit, offset] + params_where)
             data = [{
-                "Tanggal SO": row[0], "Under": "AQPA", "Penjual": str(row[1] or "").strip(),
+                "Tanggal SO": _format_integration_date(row[0]), "Under": "AQPA", "Penjual": str(row[1] or "").strip(),
                 "No. Customer": str(row[2] or "").strip(), "Nama Customer": str(row[3] or "").strip(),
                 "No. SO": str(row[4] or "").strip(), "No. PO": str(row[5] or "").strip(),
                 "Nilai SO": float(row[6] or 0), "Status": str(row[7] or ""), "Catatan": str(row[8] or "").strip(),
@@ -9202,7 +9210,7 @@ def _get_penjualan_so_item_oriented_rows(resource, options=None):
                 ORDER BY so.SODATE DESC, so.SONO, det.SEQ
             """, [limit, offset] + params_where)
             data = [{
-                "Tanggal SO": row[0], "Under": "AQPA", "Penjual": str(row[1] or "").strip(),
+                "Tanggal SO": _format_integration_date(row[0]), "Under": "AQPA", "Penjual": str(row[1] or "").strip(),
                 "No. Customer": str(row[2] or "").strip(), "Nama Customer": str(row[3] or "").strip(),
                 "No. SO": str(row[4] or "").strip(), "No. PO": str(row[5] or "").strip(),
                 "No. Barang": str(row[6] or "").strip(), "Deskripsi Barang": str(row[7] or "").strip(),
