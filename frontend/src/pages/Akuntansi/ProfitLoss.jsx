@@ -156,6 +156,14 @@ function DeliveryReferenceCell({ value, details = [], color, type, fallbackTitle
                 <Text type="secondary"> | Harga: </Text><Text>{formatCurrency(detail.harga)}</Text>
               </div>
               <div><Text type="secondary">Nilai DPP: </Text><Text strong>{formatCurrency(detail.nilai_dpp)}</Text></div>
+              {detail.nilai_dpp_asal !== undefined && (
+                <>
+                  <div><Text type="secondary">DPP transaksi asal: </Text>{formatCurrency(detail.nilai_dpp_asal)}</div>
+                  {detail.referensi_ai_pp?.length > 0 && <div><Text type="secondary">AI-PP: </Text>{detail.referensi_ai_pp.join(', ')}</div>}
+                  {detail.referensi_ai_do?.length > 0 && <div><Text type="secondary">AI-DO: </Text>{detail.referensi_ai_do.join(', ')}</div>}
+                  <div><Text type="secondary">Dasar alokasi: </Text>{detail.dasar_alokasi || '-'}</div>
+                </>
+              )}
             </>
           ) : (
             <>

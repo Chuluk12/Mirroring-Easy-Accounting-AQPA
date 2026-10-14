@@ -12752,6 +12752,10 @@ def _profit_loss_delivery_map(cur, no_sos):
     if not normalized_no_sos:
         return result
 
+    delivery_sources = []
+    seen_delivery_sources = set()
+    do_references = set()
+
     for start in range(0, len(normalized_no_sos), 500):
         chunk = normalized_no_sos[start:start + 500]
         placeholders = ",".join(["?"] * len(chunk))
@@ -12762,6 +12766,8 @@ def _profit_loss_delivery_map(cur, no_sos):
                     NULLIF(TRIM(rd.ITEMRESERVED9), ''),
                     NULLIF(TRIM(det.ITEMRESERVED9), '')
                 ))),
+                COALESCE(rd.ITEMOVDESC, ''),
+                COALESCE(det.ITEMOVDESC, ''),
                 po.PONO,
                 po.PODATE,
                 pd.NAME,
@@ -12782,37 +12788,53 @@ def _profit_loss_delivery_map(cur, no_sos):
                     )
                     FROM PODET det_sum
                     WHERE det_sum.POID = po.POID
-                )
+                ),
+                po.POID,
+                det.SEQ
             FROM PO po
             JOIN PODET det ON det.POID = po.POID
             LEFT JOIN REQUISITIONDET rd ON rd.REQID = det.REQID AND rd.SEQ = det.REQSEQ
             LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
             LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
             WHERE UPPER(TRIM(COALESCE(po.PONO, ''))) STARTING WITH 'AI-SRV'
-              AND UPPER(TRIM(COALESCE(
-                    NULLIF(TRIM(rd.ITEMRESERVED9), ''),
-                    NULLIF(TRIM(det.ITEMRESERVED9), '')
-                  ))) IN ({placeholders})
               AND UPPER(TRIM(COALESCE(det.ITEMNO, ''))) = ?
-        """, chunk + [delivery_purchase_item_no])
+              AND (
+                    UPPER(TRIM(COALESCE(
+                        NULLIF(TRIM(rd.ITEMRESERVED9), ''),
+                        NULLIF(TRIM(det.ITEMRESERVED9), '')
+                    ))) IN ({placeholders})
+                    OR UPPER(COALESCE(rd.ITEMOVDESC, '')) CONTAINING 'AI-PP-'
+                    OR UPPER(COALESCE(det.ITEMOVDESC, '')) CONTAINING 'AI-PP-'
+                    OR UPPER(COALESCE(rd.ITEMOVDESC, '')) CONTAINING 'AI-DO-'
+                    OR UPPER(COALESCE(det.ITEMOVDESC, '')) CONTAINING 'AI-DO-'
+                  )
+        """, [delivery_purchase_item_no] + chunk)
         for row in cur.fetchall():
-            no_so = str(row[0] or "").strip().upper()
-            amounts = _purchase_amounts(row[6], row[7], row[8], row[11], row[9], row[10])
-            entry = result.setdefault(no_so, {"amount": 0.0, "po_numbers": [], "details": []})
-            entry["amount"] += amounts["dpp"]
-            no_delivery = str(row[1] or "").strip()
-            if no_delivery and no_delivery not in entry["po_numbers"]:
-                entry["po_numbers"].append(no_delivery)
-            entry["details"].append({
-                "no_transaksi": no_delivery,
-                "tanggal": str(row[2]) if row[2] else "",
-                "nama_vendor": str(row[3] or "").strip(),
-                "no_barang": str(row[4] or "").strip(),
-                "deskripsi_barang": str(row[5] or "").strip(),
-                "qty": round(_to_float(row[6]), 4),
-                "harga": round(_to_float(row[7]), 2),
-                "nilai_dpp": round(_to_float(amounts.get("dpp")), 2),
-                "source_type": "item",
+            refs = _profit_loss_project_references(row[0], row[1], row[2])
+            do_refs = _profit_loss_extract_do_numbers(" ".join([str(row[1] or ""), str(row[2] or "")]))
+            do_references.update(do_refs)
+            amounts = _purchase_amounts(row[8], row[9], row[10], row[13], row[11], row[12])
+            source_key = (
+                int(row[14] or 0),
+                int(row[15] or 0),
+            )
+            if source_key in seen_delivery_sources:
+                continue
+            seen_delivery_sources.add(source_key)
+            delivery_sources.append({
+                "refs": refs,
+                "do_refs": do_refs,
+                "amount": round(_to_float(amounts.get("dpp")), 2),
+                "detail": {
+                    "no_transaksi": str(row[3] or "").strip(),
+                    "tanggal": str(row[4]) if row[4] else "",
+                    "nama_vendor": str(row[5] or "").strip(),
+                    "no_barang": str(row[6] or "").strip(),
+                    "deskripsi_barang": str(row[7] or "").strip(),
+                    "qty": round(_to_float(row[8]), 4),
+                    "harga": round(_to_float(row[9]), 2),
+                    "source_type": "item",
+                },
             })
 
         cur.execute(f"""
@@ -12894,6 +12916,91 @@ def _profit_loss_delivery_map(cur, no_sos):
                 "no_pr": str(row[4] or "").strip(),
                 "source_type": "add_cost",
             })
+
+
+    # Resolve AI-DO references in PR/PO descriptions back to their sales orders.
+    do_to_sos = {}
+    normalized_do_refs = sorted(do_references)
+    for start in range(0, len(normalized_do_refs), 500):
+        chunk = normalized_do_refs[start:start + 500]
+        placeholders = ",".join(["?"] * len(chunk))
+        cur.execute(f"""
+            SELECT UPPER(TRIM(delivery.INVOICENO)), UPPER(TRIM(COALESCE(so.SONO, '')))
+            FROM ARINV delivery
+            JOIN ARINVDET det ON det.ARINVOICEID = delivery.ARINVOICEID
+            LEFT JOIN SO so ON so.SOID = det.SOID
+            WHERE UPPER(TRIM(delivery.INVOICENO)) IN ({placeholders})
+              AND delivery.DELIVERYORDER = '1'
+              AND delivery.INVOICETYPE = 1
+              AND COALESCE(TRIM(so.SONO), '') <> ''
+        """, chunk)
+        for no_do, no_so in cur.fetchall():
+            do_to_sos.setdefault(str(no_do or "").strip().upper(), set()).add(str(no_so or "").strip().upper())
+
+    all_references = sorted({
+        ref
+        for source in delivery_sources
+        for ref in source["refs"] + [
+            no_so
+            for no_do in source["do_refs"]
+            for no_so in do_to_sos.get(no_do, set())
+        ]
+    })
+    sales_weights = {}
+    for start in range(0, len(all_references), 500):
+        chunk = all_references[start:start + 500]
+        placeholders = ",".join(["?"] * len(chunk))
+        cur.execute(f"""
+            SELECT UPPER(TRIM(so.SONO)), SUM(
+                COALESCE(det.QUANTITY, 0) * COALESCE(det.UNITPRICE, 0)
+            )
+            FROM SO so
+            JOIN SODET det ON det.SOID = so.SOID
+            WHERE UPPER(TRIM(so.SONO)) IN ({placeholders})
+            GROUP BY UPPER(TRIM(so.SONO))
+        """, chunk)
+        for no_so, amount in cur.fetchall():
+            sales_weights[str(no_so or "").strip().upper()] = max(_to_float(amount), 0)
+
+    for source in delivery_sources:
+        refs = list(dict.fromkeys(source["refs"] + [
+            no_so
+            for no_do in source["do_refs"]
+            for no_so in sorted(do_to_sos.get(no_do, set()))
+        ]))
+        if not refs or source["amount"] <= 0:
+            continue
+        total_weight = sum(sales_weights.get(ref, 0) for ref in refs)
+        allocated = 0.0
+        for index, no_so in enumerate(refs):
+            if index == len(refs) - 1:
+                amount = round(source["amount"] - allocated, 2)
+            elif total_weight > 0:
+                amount = min(
+                    max(round(source["amount"] * sales_weights.get(no_so, 0) / total_weight, 2), 0),
+                    round(source["amount"] - allocated, 2),
+                )
+            else:
+                amount = min(
+                    max(round(source["amount"] / len(refs), 2), 0),
+                    round(source["amount"] - allocated, 2),
+                )
+            allocated += amount
+            entry = result.setdefault(no_so, {"amount": 0.0, "po_numbers": [], "details": []})
+            entry["amount"] += amount
+            detail = dict(source["detail"])
+            detail.update({
+                "nilai_dpp": amount,
+                "nilai_dpp_asal": source["amount"],
+                "referensi_ai_pp": refs,
+                "referensi_ai_do": source["do_refs"],
+                "dasar_alokasi": "Nilai SO" if total_weight > 0 else "Rata (nilai SO tidak tersedia)",
+            })
+            entry["details"].append(detail)
+            no_delivery = detail["no_transaksi"]
+            if no_delivery and no_delivery not in entry["po_numbers"]:
+                entry["po_numbers"].append(no_delivery)
+
 
     for entry in result.values():
         entry["amount"] = round(entry["amount"], 2)
