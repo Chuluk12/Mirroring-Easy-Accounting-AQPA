@@ -3370,6 +3370,9 @@ def api_dashboard_summary():
 
     date_from = request.args.get("date_from") or datetime.now().replace(day=1).strftime("%Y-%m-%d")
     date_to = request.args.get("date_to") or datetime.now().strftime("%Y-%m-%d")
+    customer_type_id = request.args.get("customer_type_id") or None
+    customer_type_filter = "AND pd.CUSTOMERTYPEID = ?" if customer_type_id else ""
+    customer_type_params = [customer_type_id] if customer_type_id else []
     fast_mode = request.args.get("fast") in ("1", "true", "yes")
     period_filter = "{field} >= ? AND {field} <= ?"
     det_discpc = sql_number_expr("det.DISCPC")
@@ -4330,7 +4333,9 @@ def api_dashboard_summary():
             FROM SO so
             LEFT JOIN SODET det ON det.SOID = so.SOID
             LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
+            LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
             WHERE det.ITEMNO IS NOT NULL
+              {customer_type_filter}
               AND {period_filter.format(field="so.SODATE")}
             GROUP BY CASE
                 WHEN NULLIF(TRIM(i.RESERVED9), '') IS NULL
@@ -4342,7 +4347,7 @@ def api_dashboard_summary():
                 ELSE TRIM(i.RESERVED9)
             END
             ORDER BY 2 DESC, 3 DESC
-        """, [date_from, date_to])
+        """, customer_type_params + [date_from, date_to])
         sold_by_category = [
             {
                 "label": str(row[0] or "").strip(),
@@ -4360,11 +4365,13 @@ def api_dashboard_summary():
             FROM SO so
             LEFT JOIN SODET det ON det.SOID = so.SOID
             LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
+            LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
             WHERE det.ITEMNO IS NOT NULL
+              {customer_type_filter}
               AND {period_filter.format(field="so.SODATE")}
             GROUP BY COALESCE(NULLIF(TRIM(i.RESERVED8), ''), 'Tanpa Code Product')
             ORDER BY 2 DESC, 3 DESC
-        """, [date_from, date_to])
+        """, customer_type_params + [date_from, date_to])
         sold_by_code_product = [
             {
                 "label": str(row[0] or "").strip(),
@@ -4372,6 +4379,13 @@ def api_dashboard_summary():
                 "amount": float(row[2] or 0),
             }
             for row in cur.fetchall()
+        ]
+
+        cur.execute("SELECT CUSTOMERTYPEID, TYPENAME FROM CUSTTYPE ORDER BY TYPENAME")
+        customer_types = [
+            {"id": int(row[0]), "name": str(row[1] or "").strip()}
+            for row in cur.fetchall()
+            if row[0] is not None
         ]
 
         cur.execute("""
@@ -4948,6 +4962,7 @@ def api_dashboard_summary():
                 "sales_receivables_by_salesman": sales_receivables_by_salesman,
                 "sold_by_category": sold_by_category,
                 "sold_by_code_product": sold_by_code_product,
+                "customer_types": customer_types,
                 "customer_cities": customer_cities,
                 "outstanding_receivables": outstanding_receivables,
                 "receivable_aging": receivable_aging,

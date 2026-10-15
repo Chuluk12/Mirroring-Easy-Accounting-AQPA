@@ -84,6 +84,7 @@ const emptySummary = {
     sales_receivables_by_salesman: [],
     sold_by_category: [],
     sold_by_code_product: [],
+    customer_types: [],
     customer_cities: [],
     so_month_status: {
       total: 0,
@@ -607,7 +608,7 @@ function SoftBarChart({ title, icon, rows, getName, getMeta, color, loading, met
 
 const pieColors = [cyan, purple, orange, green, red, '#64748b']
 
-function SoftPieChart({ title, icon, rows, loading, accent = cyan, onRowClick }) {
+function SoftPieChart({ title, icon, rows, loading, accent = cyan, onRowClick, filterControl }) {
   const chartRows = (rows || []).filter(row => Number(row.qty || 0) > 0).slice(0, 6)
   const total = chartRows.reduce((sum, row) => sum + Number(row.qty || 0), 0)
   const topRow = chartRows[0] || {}
@@ -635,6 +636,7 @@ function SoftPieChart({ title, icon, rows, loading, accent = cyan, onRowClick })
       }}
       styles={{ body: { padding: 18 } }}
     >
+      {filterControl && <div style={{ marginBottom: 16 }}>{filterControl}</div>}
       <div
         style={{
           minHeight: 270,
@@ -4600,8 +4602,23 @@ function DeliveryModule({ sales = {}, loading }) {
   )
 }
 
-function SalesModule({ sales, loading, detailLoading = false, canViewInvoice = true, dateRange }) {
+function SalesModule({ sales, loading, detailLoading = false, canViewInvoice = true, dateRange, customerTypeId, onCustomerTypeChange }) {
   const targetReached = Number(sales.target_achievement_pct || 0) >= 100
+  const customerTypeOptions = [
+    { value: '', label: 'Semua tipe pelanggan' },
+    ...(sales.customer_types || []).map(type => ({ value: String(type.id), label: type.name })),
+  ]
+  const customerTypeFilter = () => (
+    <Space wrap>
+      <Text strong>Tipe pelanggan:</Text>
+      <Select
+        value={customerTypeId}
+        onChange={onCustomerTypeChange}
+        style={{ minWidth: 200 }}
+        options={customerTypeOptions}
+      />
+    </Space>
+  )
   const [selectedProduct, setSelectedProduct] = useState(null)
   const [productDetails, setProductDetails] = useState({ data: [], summary: {} })
   const [productDetailsLoading, setProductDetailsLoading] = useState(false)
@@ -4842,6 +4859,7 @@ function SalesModule({ sales, loading, detailLoading = false, canViewInvoice = t
           rows={sales.sold_by_category}
           accent={cyan}
           loading={loading}
+          filterControl={customerTypeFilter()}
           onRowClick={row => openGroupDetails(row, 'category')}
         />
       </Col>
@@ -4852,6 +4870,7 @@ function SalesModule({ sales, loading, detailLoading = false, canViewInvoice = t
           rows={sales.sold_by_code_product}
           accent={purple}
           loading={loading}
+          filterControl={customerTypeFilter()}
           onRowClick={row => openGroupDetails(row, 'code_product')}
         />
       </Col>
@@ -5560,6 +5579,7 @@ export default function Dashboard() {
   const [summary, setSummary] = useState(emptySummary)
   const [hppTrend, setHppTrend] = useState([])
   const [dateRange, setDateRange] = useState(defaultDateRange)
+  const [customerTypeId, setCustomerTypeId] = useState('')
   const [hppTrendRange, setHppTrendRange] = useState(defaultDateRange)
   const [loading, setLoading] = useState(true)
   const [detailLoading, setDetailLoading] = useState(true)
@@ -5574,7 +5594,7 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchSummary()
-  }, [dateRange])
+  }, [dateRange, customerTypeId])
 
   useEffect(() => {
     if (canViewAccounting) fetchHppTrend()
@@ -5590,6 +5610,7 @@ export default function Dashboard() {
       const params = {
         date_from: dateFrom.format('YYYY-MM-DD'),
         date_to: dateTo.format('YYYY-MM-DD'),
+        customer_type_id: customerTypeId || undefined,
       }
       const res = await api.get('/api/dashboard-summary', {
         params: { ...params, fast: 1 },
@@ -5702,7 +5723,7 @@ export default function Dashboard() {
           color={red}
           icon={<ShoppingOutlined />}
         >
-          <SalesModule sales={summary.sales} loading={loading} detailLoading={detailLoading} canViewInvoice={canViewInvoice} dateRange={dateRange} />
+          <SalesModule sales={summary.sales} loading={loading} detailLoading={detailLoading} canViewInvoice={canViewInvoice} dateRange={dateRange} customerTypeId={customerTypeId} onCustomerTypeChange={setCustomerTypeId} />
         </ModuleSection>
       )}
 
