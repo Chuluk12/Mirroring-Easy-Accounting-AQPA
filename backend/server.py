@@ -9,6 +9,9 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 import locale
+import json
+import urllib.error
+import urllib.request
 from auth import (
     init_db, get_user, get_user_permissions,
     get_all_users, get_user_by_id, create_user, delete_user, update_user_password, verify_password,
@@ -115,6 +118,12 @@ def load_env_file(path):
 load_env_file(Path(__file__).with_name(".env"))
 
 DRIVER_INTEGRATION_API_KEY = os.getenv("DRIVER_INTEGRATION_API_KEY", "").strip()
+SHIPMENT_TRACKING_URL = os.getenv(
+    "SHIPMENT_TRACKING_URL",
+    "https://driverapp.aqpa-indonesia.com/api/integration/shipment-tracking",
+).strip()
+SHIPMENT_TRACKING_API_KEY = os.getenv("SHIPMENT_TRACKING_API_KEY", "").strip()
+SHIPMENT_TRACKING_TIMEOUT = float(os.getenv("SHIPMENT_TRACKING_TIMEOUT", "5"))
 
 DB_CONFIG = {
     "host": os.getenv("EASY_DB_HOST", "192.168.10.5"),
@@ -296,7 +305,7 @@ MODULE_COLUMNS = {
         "no_faktur", "no_do", "no_so", "tgl_faktur", "no_barang", "deskripsi_barang",
         "qty_faktur", "uom", "harga_satuan", "jumlah", "nilai_hpp", "hpp_reference",
         "delivery", "delivery_details", "delivery_ju", "delivery_ju_details",
-        "cf", "cf_pct", "cf_details", "mf", "mf_pct", "mf_details",
+        "packing_cost", "delivery_cost", "cf", "cf_pct", "cf_details", "mf", "mf_pct", "mf_details",
         "biaya_project", "biaya_project_details", "total_biaya", "laba_operasi",
         "gross_profit", "margin_pct", "no_pelanggan", "nama_pelanggan",
         "no_po", "marketing", "no_delivery", "no_jurnal_delivery_ju",
@@ -413,7 +422,7 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "hpp": ["no_barang", "sales_details"],
     "profit_loss": [
         "no_faktur", "no_barang", "no_so", "delivery_details", "delivery_ju_details",
-        "cf_pct", "cf_details", "mf_pct", "mf_details", "biaya_project_details",
+        "packing_cost", "delivery_cost", "cf_pct", "cf_details", "mf_pct", "mf_details", "biaya_project_details",
     ],
     "aset": ["no_aktiva"],
     "aset_bangunan": ["tanggal", "no_project", "nilai"],
@@ -13083,7 +13092,7 @@ def _profit_loss_extract_do_numbers(description):
     return result
 
 
-def _profit_loss_delivery_ju_map(cur):
+def _profit_loss_delivery_ju_map(cur, relevant_no_dos=None):
     required_jvdet = ("JVID", "GLACCOUNT", "GLAMOUNT", "DESCRIPTION")
     required_jv = ("JVID", "JVNUMBER")
     if (
@@ -13094,19 +13103,48 @@ def _profit_loss_delivery_ju_map(cur):
     ):
         return {}
 
-    cur.execute("""
-        SELECT
-            d.GLAMOUNT,
-            d.DESCRIPTION,
-            j.JVNUMBER
-        FROM JVDET d
-        JOIN JV j ON j.JVID = d.JVID
-        WHERE CAST(d.GLACCOUNT AS VARCHAR(30)) = '6.00.00.006'
-          AND UPPER(CAST(d.DESCRIPTION AS VARCHAR(255))) CONTAINING 'AI-DO-'
-    """)
+    # Jika relevant_no_dos diberikan, hanya ambil jurnal yang mengandung DO tersebut.
+    # Menghindari scan global JVDET saat ada ribuan jurnal historis.
+    if relevant_no_dos:
+        normalized_dos = sorted({
+            str(d or "").strip().upper()
+            for d in relevant_no_dos
+            if str(d or "").strip()
+        })
+        # Bangun kondisi CONTAINING per batch agar tidak terlalu banyak OR
+        all_rows = []
+        for start in range(0, len(normalized_dos), 50):
+            chunk = normalized_dos[start:start + 50]
+            containing_clauses = " OR ".join(
+                f"UPPER(CAST(d.DESCRIPTION AS VARCHAR(255))) CONTAINING ?"
+                for _ in chunk
+            )
+            cur.execute(f"""
+                SELECT
+                    d.GLAMOUNT,
+                    d.DESCRIPTION,
+                    j.JVNUMBER
+                FROM JVDET d
+                JOIN JV j ON j.JVID = d.JVID
+                WHERE CAST(d.GLACCOUNT AS VARCHAR(30)) = '6.00.00.006'
+                  AND ({containing_clauses})
+            """, chunk)
+            all_rows.extend(cur.fetchall())
+    else:
+        cur.execute("""
+            SELECT
+                d.GLAMOUNT,
+                d.DESCRIPTION,
+                j.JVNUMBER
+            FROM JVDET d
+            JOIN JV j ON j.JVID = d.JVID
+            WHERE CAST(d.GLACCOUNT AS VARCHAR(30)) = '6.00.00.006'
+              AND UPPER(CAST(d.DESCRIPTION AS VARCHAR(255))) CONTAINING 'AI-DO-'
+        """)
+        all_rows = cur.fetchall()
 
     result = {}
-    for amount, description, journal_no in cur.fetchall():
+    for amount, description, journal_no in all_rows:
         no_dos = _profit_loss_extract_do_numbers(description)
         if not no_dos:
             continue
@@ -13472,7 +13510,7 @@ def _profit_loss_project_references(*values):
     return references
 
 
-def _profit_loss_project_cost_map(cur, rows):
+def _profit_loss_project_cost_map(cur, rows, precomputed_cf_map=None, precomputed_mf_map=None):
     row_refs = {}
     needed_refs = set()
     for index, row in enumerate(rows):
@@ -13489,6 +13527,12 @@ def _profit_loss_project_cost_map(cur, rows):
     if not needed_refs:
         return {}
 
+    # Ambil dulu semua no_project aktif mkt yang mengandung setidaknya satu needed_ref
+    # di PROJECTNO, PROJECTNAME, atau DESCRIPTION — filter awal tanpa metric dulu
+    # agar tidak memproses ratusan project yang tidak relevan.
+    needed_refs_list = sorted(needed_refs)
+    needed_refs_upper = {r.upper() for r in needed_refs_list}
+
     where_sql, params = _project_where("", "active", "mkt", "", "")
     cur.execute(f"""
         SELECT
@@ -13504,12 +13548,30 @@ def _profit_loss_project_cost_map(cur, rows):
         FROM PROJECT p
         WHERE {where_sql}
     """, params)
-    project_rows = cur.fetchall()
+    all_project_rows = cur.fetchall()
+    # Filter hanya project yang mempunyai referensi di needed_refs
+    project_remarks = get_project_remarks_for_projects(
+        str(row[1] or "").strip() for row in all_project_rows
+    )
+    project_rows = [
+        row for row in all_project_rows
+        if any(
+            ref in needed_refs_upper
+            for ref in _profit_loss_project_references(
+                str(row[1] or ""), str(row[2] or ""), str(row[8] or ""),
+                (project_remarks.get(str(row[1] or "").strip().upper()) or {}).get("remarks", ""),
+            )
+        )
+    ]
     if not project_rows:
         return {}
 
     project_rows = _with_project_base_metrics(project_rows, _project_base_metric_map(cur, project_rows))
-    project_metrics = _build_project_metric_map(cur, project_rows)
+    project_metrics = _build_project_metric_map(
+        cur, project_rows,
+        precomputed_cf_map=precomputed_cf_map,
+        precomputed_mf_map=precomputed_mf_map,
+    )
     projects = _build_project_rows(project_rows, project_metrics)
 
     amount_by_ref = {}
@@ -13596,6 +13658,63 @@ def _profit_loss_project_cost_map(cur, rows):
         for index, value in project_costs.items()
         if abs(value.get("amount", 0.0)) >= 0.005
     }
+
+
+def _shipment_tracking_cost_map(rows):
+    """Load shipment costs once and index them by normalized SO number."""
+    no_sos = sorted({
+        str(row.get("no_so") or "").strip().upper()
+        for row in rows
+        if str(row.get("no_so") or "").strip()
+    })
+    if not no_sos or not SHIPMENT_TRACKING_URL or not SHIPMENT_TRACKING_API_KEY:
+        return {}
+
+    headers = {
+        "X-API-Key": SHIPMENT_TRACKING_API_KEY,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    result = {}
+    for start in range(0, len(no_sos), 500):
+        payload = json.dumps({"no_so": no_sos[start:start + 500]}).encode("utf-8")
+        request = urllib.request.Request(
+            SHIPMENT_TRACKING_URL,
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=SHIPMENT_TRACKING_TIMEOUT) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except (OSError, ValueError, urllib.error.URLError) as error:
+            print(f"Warning shipment tracking unavailable: {error}")
+            continue
+
+        entries = body.get("data") if isinstance(body, dict) and isinstance(body.get("data"), list) else body
+        if isinstance(entries, dict):
+            entries = [entries]
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            no_so = str(entry.get("no_so") or "").strip().upper()
+            if no_so:
+                result[no_so] = {
+                    "packing_cost": _to_float(entry.get("packing_cost")),
+                    "delivery_cost": _to_float(entry.get("delivery_cost")),
+                }
+    return result
+
+
+def _enrich_profit_loss_shipment_costs(rows):
+    shipment_costs = _shipment_tracking_cost_map(rows)
+    for row in rows:
+        costs = shipment_costs.get(str(row.get("no_so") or "").strip().upper(), {})
+        row["packing_cost"] = costs.get("packing_cost", 0.0)
+        row["delivery_cost"] = costs.get("delivery_cost", 0.0)
+    return rows
 
 
 def _profit_loss_hpp_adjustment_rows(cur, date_from="", date_to=""):
@@ -13889,9 +14008,14 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search="", marketing=
             key = (invoice["customer_id"], invoice["no_po"])
             if invoice["get_from_do"]:
                 max_date_by_group[key] = max(max_date_by_group.get(key, ""), invoice["tgl_faktur"])
-        for key in sorted(group_keys):
-            customer_id, purchase_order_no = key
-            cur.execute("""
+        # Batch: ambil semua delivery dalam satu query per chunk customer_id,
+        # lalu filter customer+PO+date di Python — menghilangkan N+1 per group.
+        group_customer_ids = sorted({cid for cid, _ in group_keys})
+        global_max_date = max(max_date_by_group.values()) if max_date_by_group else ""
+        for start in range(0, len(group_customer_ids), 200):
+            chunk_cids = group_customer_ids[start:start + 200]
+            cid_placeholders = ",".join(["?"] * len(chunk_cids))
+            cur.execute(f"""
                 SELECT
                 delivery.CUSTOMERID,
                 delivery.PURCHASEORDERNO,
@@ -13916,18 +14040,28 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search="", marketing=
             LEFT JOIN SALESMAN sm ON sm.SALESMANID = so.SALESMANID
             LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
             LEFT JOIN ITEMHIST ih ON ih.ITEMHISTID = det.ITEMHISTID
-            WHERE delivery.CUSTOMERID = ?
-              AND COALESCE(TRIM(delivery.PURCHASEORDERNO), '') = ?
+            WHERE delivery.CUSTOMERID IN ({cid_placeholders})
               AND delivery.INVOICEDATE <= ?
               AND delivery.DELIVERYORDER = '1'
               AND delivery.INVOICETYPE = 1
               AND det.ITEMNO IS NOT NULL
             ORDER BY
+                delivery.CUSTOMERID,
+                delivery.PURCHASEORDERNO,
                 delivery.INVOICEDATE,
                 delivery.ARINVOICEID,
                 det.SEQ
-            """, [customer_id, purchase_order_no, max_date_by_group[key]])
+            """, chunk_cids + [global_max_date])
             for row in cur.fetchall():
+                cid = int(row[0] or 0)
+                po = str(row[1] or "").strip()
+                do_date = str(row[4]) if row[4] else ""
+                key = (cid, po)
+                # Hanya masukkan baris yang cocok dengan group_keys dan dalam max_date group tsb
+                if key not in group_keys:
+                    continue
+                if do_date > max_date_by_group.get(key, ""):
+                    continue
                 qty = float(row[9] or 0)
                 unit_price = float(row[11] or 0)
                 discount = float(row[12] or 0)
@@ -13935,7 +14069,7 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search="", marketing=
                     "_source_key": f"DO-{int(row[2] or 0)}-{int(row[5] or 0)}",
                     "do_id": int(row[2] or 0),
                     "no_do": str(row[3] or "").strip(),
-                    "do_date": str(row[4]) if row[4] else "",
+                    "do_date": do_date,
                     "do_invoice_amount": float(row[15] or 0),
                     "do_cash_discount": float(row[16] or 0),
                     "seq": int(row[5] or 0),
@@ -13954,6 +14088,107 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search="", marketing=
     invoices_by_group = {}
     for invoice in invoices:
         invoices_by_group.setdefault((invoice["customer_id"], invoice["no_po"]), []).append(invoice)
+
+    # Pre-fetch semua kandidat exact delivery dalam satu batch per chunk customer_id,
+    # menghilangkan N+1 query per invoice/cache key.
+    # Kunci: (customer_id, do_id) -> list baris detail DO
+    # Kunci: (customer_id, do_id) -> (do_amount, do_po, do_description, do_date)
+    exact_candidates_by_cid = {}   # customer_id -> {do_id: {lines, meta}}
+    invoices_needing_exact = [
+        inv for inv in invoices
+        if not direct_by_invoice.get(inv["invoice_id"])
+        and not explicit_do_refs_by_invoice.get(inv["invoice_id"])
+    ]
+    if invoices_needing_exact:
+        # Pakai range amount: min(amount)-1 hingga max(amount)+1 per customer
+        min_amount_by_cid = {}
+        max_amount_by_cid = {}
+        max_date_by_cid = {}
+        for inv in invoices_needing_exact:
+            cid = inv["customer_id"]
+            amt = float(inv.get("invoice_amount") or 0)
+            dt = inv["tgl_faktur"]
+            min_amount_by_cid[cid] = min(min_amount_by_cid.get(cid, amt), amt)
+            max_amount_by_cid[cid] = max(max_amount_by_cid.get(cid, amt), amt)
+            max_date_by_cid[cid] = max(max_date_by_cid.get(cid, dt), dt)
+        exact_cids = sorted(min_amount_by_cid.keys())
+        for start in range(0, len(exact_cids), 100):
+            chunk_cids = exact_cids[start:start + 100]
+            chunk_max_date = max(max_date_by_cid[c] for c in chunk_cids)
+            cid_placeholders = ",".join(["?"] * len(chunk_cids))
+            cur.execute(f"""
+                SELECT
+                    delivery.CUSTOMERID,
+                    delivery.ARINVOICEID,
+                    delivery.INVOICENO,
+                    delivery.INVOICEDATE,
+                    det.SEQ,
+                    so.SONO,
+                    det.ITEMNO,
+                    COALESCE(NULLIF(TRIM(det.ITEMOVDESC), ''), i.ITEMDESCRIPTION),
+                    det.QUANTITY,
+                    det.ITEMUNIT,
+                    det.UNITPRICE,
+                    COALESCE(CAST(NULLIF(TRIM(CAST(det.ITEMDISCPC AS VARCHAR(32))), '') AS DOUBLE PRECISION), 0),
+                    COALESCE(ih.COST, ih.NEWCOST, 0),
+                    COALESCE(NULLIF(TRIM(sm.FIRSTNAME || ' ' || sm.LASTNAME), ''), 'Tanpa Marketing'),
+                    delivery.INVOICEAMOUNT,
+                    COALESCE(delivery.CASHDISCOUNT, 0),
+                    delivery.PURCHASEORDERNO,
+                    delivery.DESCRIPTION
+                FROM ARINV delivery
+                JOIN ARINVDET det ON det.ARINVOICEID = delivery.ARINVOICEID
+                LEFT JOIN SO so ON so.SOID = det.SOID
+                LEFT JOIN SALESMAN sm ON sm.SALESMANID = so.SALESMANID
+                LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
+                LEFT JOIN ITEMHIST ih ON ih.ITEMHISTID = det.ITEMHISTID
+                WHERE delivery.CUSTOMERID IN ({cid_placeholders})
+                  AND delivery.INVOICEDATE <= DATEADD(14 DAY TO CAST(? AS DATE))
+                  AND delivery.DELIVERYORDER = '1'
+                  AND delivery.INVOICETYPE = 1
+                  AND det.ITEMNO IS NOT NULL
+                ORDER BY delivery.CUSTOMERID, delivery.INVOICEDATE DESC, delivery.ARINVOICEID ASC, det.SEQ
+            """, chunk_cids + [chunk_max_date])
+            for row in cur.fetchall():
+                cid = int(row[0] or 0)
+                do_id = int(row[1] or 0)
+                do_amount = float(row[14] or 0)
+                cid_min = min_amount_by_cid.get(cid, 0)
+                cid_max = max_amount_by_cid.get(cid, 0)
+                # Hanya simpan DO yang amount-nya berada dalam rentang ±1 dari invoice
+                if do_amount < cid_min - 1 or do_amount > cid_max + 1:
+                    continue
+                bucket = exact_candidates_by_cid.setdefault(cid, {})
+                if do_id not in bucket:
+                    bucket[do_id] = {
+                        "lines": [],
+                        "do_amount": do_amount,
+                        "do_po": str(row[16] or "").strip(),
+                        "do_description": str(row[17] or "").strip(),
+                        "do_date": str(row[3]) if row[3] else "",
+                    }
+                qty = float(row[8] or 0)
+                unit_price = float(row[10] or 0)
+                discount = float(row[11] or 0)
+                bucket[do_id]["lines"].append({
+                    "_source_key": f"DO-{do_id}-{int(row[4] or 0)}",
+                    "do_id": do_id,
+                    "no_do": str(row[2] or "").strip(),
+                    "do_date": str(row[3]) if row[3] else "",
+                    "do_invoice_amount": do_amount,
+                    "do_cash_discount": float(row[15] or 0),
+                    "seq": int(row[4] or 0),
+                    "no_so": str(row[5] or "").strip(),
+                    "no_barang": str(row[6] or "").strip(),
+                    "deskripsi_barang": str(row[7] or "").strip(),
+                    "qty_faktur": qty,
+                    "uom": str(row[9] or "").strip(),
+                    "harga_satuan": unit_price,
+                    "jumlah": qty * unit_price * (1 - discount / 100),
+                    "_source_hpp": abs(float(row[12] or 0)),
+                    "marketing": str(row[13] or "").strip(),
+                    "sumber": "Faktur dari Pengiriman Barang",
+                })
 
     detail_for_invoice = {}
     exact_amount_delivery_cache = {}
@@ -13986,83 +14221,26 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search="", marketing=
             )
             if exact_cache_key not in exact_amount_delivery_cache:
                 invoice_amount = float(invoice.get("invoice_amount") or 0)
-                cur.execute("""
-                    SELECT
-                        delivery.ARINVOICEID,
-                        delivery.INVOICENO,
-                        delivery.INVOICEDATE,
-                        det.SEQ,
-                        so.SONO,
-                        det.ITEMNO,
-                        COALESCE(NULLIF(TRIM(det.ITEMOVDESC), ''), i.ITEMDESCRIPTION),
-                        det.QUANTITY,
-                        det.ITEMUNIT,
-                        det.UNITPRICE,
-                        COALESCE(CAST(NULLIF(TRIM(CAST(det.ITEMDISCPC AS VARCHAR(32))), '') AS DOUBLE PRECISION), 0),
-                        COALESCE(ih.COST, ih.NEWCOST, 0),
-                        COALESCE(NULLIF(TRIM(sm.FIRSTNAME || ' ' || sm.LASTNAME), ''), 'Tanpa Marketing'),
-                        delivery.INVOICEAMOUNT,
-                        COALESCE(delivery.CASHDISCOUNT, 0),
-                        delivery.PURCHASEORDERNO,
-                        delivery.DESCRIPTION
-                    FROM ARINV delivery
-                    JOIN ARINVDET det ON det.ARINVOICEID = delivery.ARINVOICEID
-                    LEFT JOIN SO so ON so.SOID = det.SOID
-                    LEFT JOIN SALESMAN sm ON sm.SALESMANID = so.SALESMANID
-                    LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
-                    LEFT JOIN ITEMHIST ih ON ih.ITEMHISTID = det.ITEMHISTID
-                    WHERE delivery.CUSTOMERID = ?
-                      AND delivery.INVOICEDATE <= DATEADD(14 DAY TO CAST(? AS DATE))
-                      AND delivery.DELIVERYORDER = '1'
-                      AND delivery.INVOICETYPE = 1
-                      AND delivery.INVOICEAMOUNT BETWEEN ? AND ?
-                      AND det.ITEMNO IS NOT NULL
-                    ORDER BY delivery.INVOICEDATE DESC, delivery.ARINVOICEID ASC, det.SEQ
-                """, [
-                    invoice["customer_id"],
-                    invoice["tgl_faktur"],
-                    invoice_amount - 1,
-                    invoice_amount + 1,
-                ])
+                invoice_po = str(invoice.get("no_po") or "").strip().upper()
+                invoice_po_suffix = invoice_po.rsplit("/", 1)[-1] if "/" in invoice_po else ""
+                # Gunakan data yang sudah di-prefetch — tidak ada query baru per invoice
+                cid_bucket = exact_candidates_by_cid.get(invoice["customer_id"], {})
                 exact_lines_by_do = {}
                 exact_do_meta = {}
                 exact_do_order = []
-                for row in cur.fetchall():
-                    qty = float(row[7] or 0)
-                    unit_price = float(row[9] or 0)
-                    discount = float(row[10] or 0)
-                    do_id = int(row[0] or 0)
-                    if do_id not in exact_lines_by_do:
-                        invoice_po = str(invoice.get("no_po") or "").strip().upper()
-                        delivery_po = str(row[15] or "").strip().upper()
-                        invoice_po_suffix = invoice_po.rsplit("/", 1)[-1] if "/" in invoice_po else ""
-                        delivery_po_suffix = delivery_po.rsplit("/", 1)[-1] if "/" in delivery_po else ""
-                        exact_lines_by_do[do_id] = []
-                        exact_do_order.append(do_id)
-                        exact_do_meta[do_id] = {
-                            "same_po": delivery_po == invoice_po,
-                            "same_po_suffix": bool(invoice_po_suffix and delivery_po_suffix and invoice_po_suffix == delivery_po_suffix),
-                            "acc_rcvd": "ACC RCVD" in str(row[16] or "").upper(),
-                        }
-                    exact_lines_by_do[do_id].append({
-                        "_source_key": f"DO-{int(row[0] or 0)}-{int(row[3] or 0)}",
-                        "do_id": do_id,
-                        "no_do": str(row[1] or "").strip(),
-                        "do_date": str(row[2]) if row[2] else "",
-                        "do_invoice_amount": float(row[13] or 0),
-                        "do_cash_discount": float(row[14] or 0),
-                        "seq": int(row[3] or 0),
-                        "no_so": str(row[4] or "").strip(),
-                        "no_barang": str(row[5] or "").strip(),
-                        "deskripsi_barang": str(row[6] or "").strip(),
-                        "qty_faktur": qty,
-                        "uom": str(row[8] or "").strip(),
-                        "harga_satuan": unit_price,
-                        "jumlah": qty * unit_price * (1 - discount / 100),
-                        "_source_hpp": abs(float(row[11] or 0)),
-                        "marketing": str(row[12] or "").strip(),
-                        "sumber": "Faktur dari Pengiriman Barang",
-                    })
+                for do_id, candidate in cid_bucket.items():
+                    do_amount = candidate["do_amount"]
+                    if abs(do_amount - invoice_amount) > 1:
+                        continue
+                    delivery_po = candidate["do_po"].upper()
+                    delivery_po_suffix = delivery_po.rsplit("/", 1)[-1] if "/" in delivery_po else ""
+                    exact_lines_by_do[do_id] = candidate["lines"]
+                    exact_do_order.append(do_id)
+                    exact_do_meta[do_id] = {
+                        "same_po": delivery_po == invoice_po,
+                        "same_po_suffix": bool(invoice_po_suffix and delivery_po_suffix and invoice_po_suffix == delivery_po_suffix),
+                        "acc_rcvd": "ACC RCVD" in candidate["do_description"].upper(),
+                    }
                 selected_do_id = None
                 same_po_do_ids = [
                     do_id for do_id in exact_do_order
@@ -14214,13 +14392,23 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search="", marketing=
 
     delivery_map = _profit_loss_delivery_map(cur, [row.get("no_so") for row in data])
     _profit_loss_apply_delivery(data, delivery_map)
-    delivery_ju_map = _profit_loss_delivery_ju_map(cur)
+    # Kumpulkan no_do yang ada di data agar Delivery JU hanya scan DO relevan
+    relevant_no_dos = sorted({
+        str(row.get("no_do") or "").strip().upper()
+        for row in data
+        if str(row.get("no_do") or "").strip()
+    })
+    delivery_ju_map = _profit_loss_delivery_ju_map(cur, relevant_no_dos=relevant_no_dos or None)
     _profit_loss_apply_delivery_ju(data, delivery_ju_map)
     mf_map = _profit_loss_mf_map(cur, [row.get("no_so") for row in data])
     _profit_loss_apply_mf(data, mf_map)
     cf_map = _profit_loss_cf_map(cur, [row.get("no_so") for row in data])
     _profit_loss_apply_cf(data, cf_map)
-    project_cost_map = _profit_loss_project_cost_map(cur, data)
+    project_cost_map = _profit_loss_project_cost_map(
+        cur, data,
+        precomputed_cf_map=cf_map,
+        precomputed_mf_map=mf_map,
+    )
     for index, row in enumerate(data):
         project_cost = project_cost_map.get(index) or {}
         row["biaya_project"] = round(float(project_cost.get("amount") or 0), 2)
@@ -14250,6 +14438,7 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search="", marketing=
             row for row in data
             if search_lower in " ".join(str(value or "").lower() for value in row.values())
         ]
+    _enrich_profit_loss_shipment_costs(data)
     return sorted(data, key=lambda row: (row["tgl_faktur"], row["no_faktur"], row["no_barang"]), reverse=True)
 
 
@@ -14296,6 +14485,8 @@ PROFIT_LOSS_EXPORT_COLUMNS = {
     "gross_profit",
     "delivery",
     "delivery_ju",
+    "packing_cost",
+    "delivery_cost",
     "cf",
     "cf_pct",
     "mf",
@@ -20145,7 +20336,7 @@ PROJECT_REPORT_ACCOUNT_FALLBACK_NAMES = {
 }
 
 
-def _build_project_metric_map(cur, rows):
+def _build_project_metric_map(cur, rows, precomputed_cf_map=None, precomputed_mf_map=None):
     project_ids = [int(row[0] or 0) for row in rows if int(row[0] or 0)]
     if not project_ids:
         return {}
@@ -20224,8 +20415,16 @@ def _build_project_metric_map(cur, rows):
         all_references.extend(references)
 
     if all_references:
-        cf_map = _profit_loss_cf_map(cur, all_references)
-        mf_map = _profit_loss_mf_map(cur, all_references)
+        # Reuse precomputed maps dari Profit & Loss pipeline jika tersedia,
+        # hindari hitung ulang CF/MF untuk reference yang sama.
+        if precomputed_cf_map is not None:
+            cf_map = {k: v for k, v in precomputed_cf_map.items() if k in set(all_references)}
+        else:
+            cf_map = _profit_loss_cf_map(cur, all_references)
+        if precomputed_mf_map is not None:
+            mf_map = {k: v for k, v in precomputed_mf_map.items() if k in set(all_references)}
+        else:
+            mf_map = _profit_loss_mf_map(cur, all_references)
         for project_id, references in project_refs_by_id.items():
             fee_actual = {}
             for account_key, fee_map in (
