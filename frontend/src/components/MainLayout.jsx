@@ -18,6 +18,7 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   PlusCircleOutlined,
+  PartitionOutlined,
   ProjectOutlined,
   SafetyOutlined,
   SendOutlined,
@@ -289,6 +290,7 @@ export default function MainLayout() {
           { key: '/akuntansi/profit-loss', icon: <LineChartOutlined />, label: 'Profit & Loss' },
           { key: '/akuntansi/hpp', icon: <DollarOutlined />, label: <DevelopmentMenuLabel>HPP</DevelopmentMenuLabel>, disabled: true },
           { key: '/akuntansi/aset', icon: <CalculatorOutlined />, label: 'Aset' },
+          { key: '/akuntansi/monitoring-mf', icon: <PartitionOutlined />, label: 'Monitoring MF' },
           { key: '/akuntansi/beban-gaji', icon: <DollarOutlined />, label: <DevelopmentMenuLabel>Beban</DevelopmentMenuLabel>, disabled: true },
         ],
       })

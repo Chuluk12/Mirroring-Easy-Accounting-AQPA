@@ -260,6 +260,16 @@ MODULE_COLUMNS = {
         "tax_treatment", "tax_rate", "tax_amount", "gross_amount", "net_amount", "tax_reason",
         "batch_id", "batch_no", "customer_no", "customer_name", "customer_po",
     ],
+    "monitoring_mf": [
+        "no_faktur", "tgl_faktur", "no_pemasok", "nama_pemasok", "no_barang",
+        "deskripsi_barang", "harga_satuan", "qty", "nilai_mf", "status_pembayaran",
+        "status_faktur", "status_persediaan", "no_so", "dpp_so", "nilai_mf_expected",
+        "dpp_mf", "persentase_mf", "selisih_dpp", "selisih_mf", "selisih_harga",
+        "validasi_harga", "cek_persediaan", "stok_persediaan", "marketing",
+        "bulan", "no_pengajuan", "nama_marketing", "bank", "nomor_rekening",
+        "dpp", "pph21", "total", "grand_total",
+        "status_rekap", "jumlah_lunas", "nilai_lunas", "jumlah_belum_lunas", "nilai_belum_lunas",
+    ],
     "customer_registration_documents": [
         "customer_no", "no_pelanggan", "nama_pelanggan", "kontak", "telepon",
         "kota", "nama_salesman", "status", "documents", "custom_documents",
@@ -371,6 +381,7 @@ MODULE_COLUMN_PARENTS = {
     "invoice": "penjualan",
     "salesman": "penjualan",
     "fee_submission": "penjualan",
+    "monitoring_mf": "akuntansi",
     "customer": "penjualan",
     "customer_registration_documents": "penjualan",
     "spk": "spk",
@@ -405,6 +416,7 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "invoice": ["no_faktur"],
     "salesman": ["salesman_id", "targets"],
     "fee_submission": ["so_no", "salesman_id", "status"],
+    "monitoring_mf": ["row_key", "no_faktur", "no_barang", "status_pembayaran", "status_faktur", "status_persediaan", "validasi_harga"],
     "customer": ["customer_id", "no_pelanggan", "nama_pelanggan"],
     "customer_registration_documents": ["customer_no", "no_pelanggan", "nama_pelanggan", "documents", "custom_documents"],
     "spk": ["wodet_id", "no_spk", "no_barang"],
@@ -3343,6 +3355,432 @@ def _dashboard_delivery_history(cur, date_from, date_to):
         "packing_rows": mfsht_history_rows("UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) CONTAINING 'SUPPORT PACKAG'"),
         "pemasangan_rows": mfsht_history_rows("UPPER(TRIM(COALESCE(m.DESCRIPTION, ''))) CONTAINING 'LTK'"),
     }
+
+
+@app.route("/api/monitoring-mf")
+@jwt_required()
+def api_monitoring_mf():
+    if not check_permission("akuntansi"):
+        return jsonify({"message": "Akses ditolak"}), 403
+
+    search = request.args.get("search", "").strip()
+    date_from = request.args.get("date_from", "").strip()
+    date_to = request.args.get("date_to", "").strip()
+    payment_status = request.args.get("status", "").strip().lower()
+    marketing_filter = request.args.get("marketing", "").strip()
+    offset = max(int(request.args.get("offset", 0)), 0)
+    limit = min(max(int(request.args.get("limit", 50)), 1), 500)
+    conditions = [
+        "UPPER(TRIM(COALESCE(ai.INVOICENO, ''))) STARTING WITH 'AI-MF-'",
+        "det.ITEMNO IS NOT NULL",
+        "(ai.ISDP IS NULL OR ai.ISDP = 0)",
+    ]
+    params = []
+    if date_from:
+        conditions.append("ai.INVOICEDATE >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("ai.INVOICEDATE < DATEADD(1 DAY TO CAST(? AS DATE))")
+        params.append(date_to)
+    if search:
+        conditions.append("""(
+            LOWER(COALESCE(ai.INVOICENO, '')) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(pd.NAME, '')) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(det.ITEMNO, '')) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(det.ITEMOVDESC, '')) CONTAINING LOWER(?)
+        )""")
+        params.extend([search] * 4)
+    if marketing_filter == "__NO_MARKETING__":
+        conditions.append("NULLIF(TRIM(COALESCE(marketing_sm.FIRSTNAME || ' ' || marketing_sm.LASTNAME, '')), '') IS NULL")
+    elif marketing_filter:
+        conditions.append("UPPER(TRIM(COALESCE(marketing_sm.FIRSTNAME || ' ' || marketing_sm.LASTNAME, ''))) = UPPER(?)")
+        params.append(marketing_filter)
+    marketing_join_sql = """
+        LEFT JOIN SO marketing_so ON marketing_so.SONO = SUBSTRING(det.ITEMNO FROM 4)
+        LEFT JOIN SALESMAN marketing_sm ON marketing_sm.SALESMANID = marketing_so.SALESMANID
+    """
+    finance_paid_condition = """
+        COALESCE(ai.OWING, 0) <= 0
+        AND EXISTS (
+            SELECT 1 FROM ITEM stock_check
+            WHERE stock_check.ITEMNO = det.ITEMNO
+              AND COALESCE(stock_check.SUSPENDED, 0) <> 0
+        )
+    """
+    if payment_status in {"sudah_dibayar_finance", "paid"}:
+        conditions.append(f"({finance_paid_condition})")
+    elif payment_status in {"belum_dibayar_finance", "unpaid"}:
+        conditions.append(f"NOT ({finance_paid_condition})")
+    where_sql = " AND ".join(conditions)
+
+    con = None
+    try:
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute(f"""
+            SELECT COUNT(*)
+            FROM APINV ai
+            JOIN APITMDET det ON det.APINVOICEID = ai.APINVOICEID
+            LEFT JOIN PERSONDATA pd ON pd.ID = ai.VENDORID
+            {marketing_join_sql}
+            WHERE {where_sql}
+        """, params)
+        total = int((cur.fetchone() or [0])[0] or 0)
+        cur.execute(f"""
+            SELECT FIRST ? SKIP ?
+                ai.APINVOICEID,
+                det.SEQ,
+                ai.INVOICENO,
+                ai.INVOICEDATE,
+                pd.PERSONNO,
+                pd.NAME,
+                det.ITEMNO,
+                COALESCE(NULLIF(TRIM(det.ITEMOVDESC), ''), i.ITEMDESCRIPTION),
+                COALESCE(det.UNITPRICE, 0),
+                COALESCE(det.QUANTITY, 0),
+                COALESCE({sql_number_expr('det.ITEMDISCPC')}, 0),
+                COALESCE(ai.PAIDAMOUNT, 0),
+                COALESCE(ai.OWING, 0),
+                CASE WHEN i.ITEMNO IS NULL THEN 0 ELSE 1 END,
+                COALESCE(i.SUSPENDED, 0),
+                COALESCE((SELECT SUM(sw.QTY) FROM SALDO_WHS sw WHERE sw.ITEMNO = det.ITEMNO), 0),
+                COALESCE(ai.INVOICEAMOUNT, 0)
+            FROM APINV ai
+            JOIN APITMDET det ON det.APINVOICEID = ai.APINVOICEID
+            LEFT JOIN PERSONDATA pd ON pd.ID = ai.VENDORID
+            LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
+            {marketing_join_sql}
+            WHERE {where_sql}
+            ORDER BY ai.INVOICEDATE DESC, ai.INVOICENO DESC, det.SEQ
+        """, [limit, offset] + params)
+        raw_rows = cur.fetchall()
+        invoice_base_map = {}
+        invoice_ids = sorted({int(row[0] or 0) for row in raw_rows if int(row[0] or 0)})
+        for chunk_start in range(0, len(invoice_ids), 400):
+            chunk = invoice_ids[chunk_start:chunk_start + 400]
+            placeholders = ', '.join(['?'] * len(chunk))
+            cur.execute(f"""
+                SELECT det.APINVOICEID,
+                    SUM(COALESCE(det.QUANTITY, 0) * COALESCE(det.UNITPRICE, 0)
+                        * (1 - COALESCE({sql_number_expr('det.ITEMDISCPC')}, 0) / 100))
+                FROM APITMDET det
+                WHERE det.APINVOICEID IN ({placeholders})
+                GROUP BY det.APINVOICEID
+            """, chunk)
+            for invoice_id, base_amount in cur.fetchall():
+                invoice_base_map[int(invoice_id or 0)] = max(_to_float(base_amount), 0)
+        so_candidates = sorted({
+            str(row[6] or '').strip()[3:].upper()
+            for row in raw_rows
+            if str(row[6] or '').strip().upper().startswith('MF-AI-PP-')
+        })
+        sales_order_map = {}
+        for chunk_start in range(0, len(so_candidates), 400):
+            chunk = so_candidates[chunk_start:chunk_start + 400]
+            placeholders = ', '.join(['?'] * len(chunk))
+            cur.execute(f"""
+                SELECT
+                    so.SONO,
+                    so.SALESMANID,
+                    COALESCE(NULLIF(TRIM(sm.FIRSTNAME || ' ' || sm.LASTNAME), ''), ''),
+                    COALESCE(SUM(
+                        COALESCE(sd.QUANTITY, 0) * COALESCE(sd.UNITPRICE, 0)
+                        * (1 - COALESCE({sql_number_expr('sd.DISCPC')}, 0) / 100)
+                    ), 0),
+                    COALESCE(so.CASHDISCOUNT, 0),
+                    COALESCE(so.CASHDISCPC, 0)
+                FROM SO so
+                LEFT JOIN SODET sd ON sd.SOID = so.SOID AND sd.ITEMNO IS NOT NULL
+                LEFT JOIN SALESMAN sm ON sm.SALESMANID = so.SALESMANID
+                WHERE so.SONO IN ({placeholders})
+                GROUP BY so.SOID, so.SONO, so.SALESMANID, sm.FIRSTNAME, sm.LASTNAME,
+                         so.CASHDISCOUNT, so.CASHDISCPC
+            """, chunk)
+            for sales_row in cur.fetchall():
+                sales_order_map[str(sales_row[0] or '').strip().upper()] = {
+                    "salesman_id": int(sales_row[1] or 0),
+                    "marketing": str(sales_row[2] or '').strip(),
+                    "subtotal": _to_float(sales_row[3]),
+                    "cash_discount": _to_float(sales_row[4]),
+                    "cash_discount_pct": _to_float(sales_row[5]),
+                }
+        data = []
+        for row in raw_rows:
+            qty = _to_float(row[9])
+            unit_price = _to_float(row[8])
+            line_discount_pct = _to_float(row[10])
+            line_dpp = round(max(qty * unit_price * (1 - line_discount_pct / 100), 0), 2)
+            invoice_id = int(row[0] or 0)
+            invoice_net = max(_to_float(row[16]), 0)
+            invoice_base = invoice_base_map.get(invoice_id, 0)
+            invoice_gross_mf = invoice_net / 0.97 if invoice_net else 0
+            mf_pct = (invoice_gross_mf / invoice_base * 100) if invoice_base else 0
+            actual_amount = round(invoice_gross_mf * line_dpp / invoice_base, 2) if invoice_base else 0
+            candidate_so_no = str(row[6] or '').strip()[3:].upper() if str(row[6] or '').strip().upper().startswith('MF-AI-PP-') else ''
+            sales_order = sales_order_map.get(candidate_so_no, {})
+            so_no = candidate_so_no if sales_order else ''
+            so_subtotal = max(_to_float(sales_order.get("subtotal")), 0)
+            so_header_discount = max(_to_float(sales_order.get("cash_discount")), 0) or so_subtotal * max(_to_float(sales_order.get("cash_discount_pct")), 0) / 100
+            so_dpp = round(max(so_subtotal - so_header_discount, 0), 2) if so_no else 0
+            expected_amount = round(so_dpp * mf_pct / 100, 2) if so_no else 0
+            dpp_difference = round(line_dpp - so_dpp, 2) if so_no else None
+            mf_difference = round(actual_amount - expected_amount, 2) if so_no else None
+            tolerance = max(1.0, so_dpp * 0.005)
+            if not so_no:
+                price_validation = "SO Tidak Ditemukan"
+            elif abs(dpp_difference) <= tolerance:
+                price_validation = "OK"
+            else:
+                price_validation = "Selisih"
+            owing = _to_float(row[12])
+            item_exists = int(row[13] or 0) == 1
+            inventory_suspended = int(row[14] or 0) != 0
+            invoice_paid = owing <= 0
+            finance_paid = inventory_suspended and invoice_paid
+            data.append({
+                "row_key": f"{int(row[0] or 0)}-{int(row[1] or 0)}",
+                "no_faktur": str(row[2] or "").strip(),
+                "tgl_faktur": str(row[3]) if row[3] else "",
+                "no_pemasok": str(row[4] or "").strip(),
+                "nama_pemasok": str(row[5] or "").strip(),
+                "no_barang": str(row[6] or "").strip(),
+                "deskripsi_barang": str(row[7] or "").strip(),
+                "harga_satuan": unit_price,
+                "qty": qty,
+                "nilai_mf": actual_amount,
+                "dpp_mf": line_dpp,
+                "persentase_mf": round(mf_pct, 4),
+                "nilai_terbayar": _to_float(row[11]),
+                "terhutang": owing,
+                "status_pembayaran": "Sudah Dibayar Finance" if finance_paid else "Belum Dibayar Finance",
+                "status_faktur": "Lunas" if invoice_paid else "Belum Lunas",
+                "status_persediaan": "Tidak ditemukan" if not item_exists else ("Dihentikan" if inventory_suspended else "Aktif"),
+                "no_so": so_no,
+                "dpp_so": so_dpp,
+                "nilai_mf_expected": expected_amount,
+                "selisih_dpp": dpp_difference,
+                "selisih_mf": mf_difference,
+                "selisih_harga": mf_difference,
+                "validasi_harga": price_validation,
+                "cek_persediaan": 1 if item_exists else 0,
+                "stok_persediaan": _to_float(row[15]),
+                "marketing": str(sales_order.get("marketing") or "").strip(),
+                "salesman_id": int(sales_order.get("salesman_id") or 0),
+            })
+
+        cur.execute(f"""
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(x.nilai_mf), 0),
+                SUM(CASE WHEN x.dibayar_finance = 1 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN x.dibayar_finance = 0 THEN 1 ELSE 0 END)
+            FROM (
+                SELECT
+                    ai.APINVOICEID,
+                    MAX(CASE WHEN {finance_paid_condition} THEN 1 ELSE 0 END) AS dibayar_finance,
+                    MAX(COALESCE(ai.INVOICEAMOUNT, 0)) / 0.97 AS nilai_mf
+                FROM APINV ai
+                JOIN APITMDET det ON det.APINVOICEID = ai.APINVOICEID
+                LEFT JOIN PERSONDATA pd ON pd.ID = ai.VENDORID
+                {marketing_join_sql}
+                WHERE {where_sql}
+                GROUP BY ai.APINVOICEID
+            ) x
+        """, params)
+        summary_row = cur.fetchone() or [0, 0, 0, 0]
+        summary = {
+            "jumlah_transaksi": int(summary_row[0] or 0),
+            "total_nilai_mf": round(_to_float(summary_row[1]), 2),
+            "jumlah_sudah_dibayar_finance": int(summary_row[2] or 0),
+            "jumlah_belum_dibayar_finance": int(summary_row[3] or 0),
+        }
+        return jsonify({"data": filter_record_columns("monitoring_mf", data), "total": total, "summary": summary})
+    except Exception as e:
+        print(f"Error api_monitoring_mf: {e}")
+        return jsonify({"data": [], "total": 0, "error": str(e)}), 500
+    finally:
+        if con:
+            con.close()
+
+
+@app.route("/api/monitoring-mf/marketing-options")
+@jwt_required()
+def api_monitoring_mf_marketing_options():
+    if not check_permission("akuntansi"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    con = None
+    try:
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT DISTINCT TRIM(sm.FIRSTNAME || ' ' || sm.LASTNAME)
+            FROM SALESMAN sm
+            WHERE sm.SALESMANID IS NOT NULL
+              AND COALESCE(sm.SUSPENDED, 0) = 0
+              AND NULLIF(TRIM(COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, '')), '') IS NOT NULL
+            ORDER BY 1
+        """)
+        options = [str(row[0] or "").strip() for row in cur.fetchall() if str(row[0] or "").strip()]
+        return jsonify({"data": [{"value": name, "label": name} for name in options] + [
+            {"value": "__NO_MARKETING__", "label": "Tanpa Marketing"},
+        ]})
+    except Exception as e:
+        print(f"Error api_monitoring_mf_marketing_options: {e}")
+        return jsonify({"data": [], "error": str(e)}), 500
+    finally:
+        if con:
+            con.close()
+
+
+@app.route("/api/monitoring-mf/monthly")
+@jwt_required()
+def api_monitoring_mf_monthly():
+    if not check_permission("akuntansi"):
+        return jsonify({"message": "Akses ditolak"}), 403
+
+    try:
+        year = int(request.args.get("year") or datetime.now().year)
+        if year < 2000 or year > 2100:
+            return jsonify({"message": "Tahun tidak valid"}), 400
+        date_from = f"{year:04d}-01-01"
+        date_to = f"{year + 1:04d}-01-01"
+        month_names = [
+            "Januari", "Februari", "Maret", "April", "Mei", "Juni",
+            "Juli", "Agustus", "September", "Oktober", "November", "Desember",
+        ]
+
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT
+                ai.APINVOICEID,
+                ai.INVOICENO,
+                ai.INVOICEDATE,
+                COALESCE(ai.INVOICEAMOUNT, 0),
+                det.ITEMOVDESC,
+                CASE
+                    WHEN COALESCE(ai.OWING, 0) <= 0
+                     AND NOT EXISTS (
+                        SELECT 1
+                        FROM APITMDET paid_det
+                        LEFT JOIN ITEM paid_item ON paid_item.ITEMNO = paid_det.ITEMNO
+                        WHERE paid_det.APINVOICEID = ai.APINVOICEID
+                          AND (paid_item.ITEMNO IS NULL OR COALESCE(paid_item.SUSPENDED, 0) = 0)
+                     )
+                    THEN 1 ELSE 0
+                END
+            FROM APINV ai
+            JOIN APITMDET det ON det.APINVOICEID = ai.APINVOICEID
+            WHERE UPPER(TRIM(COALESCE(ai.INVOICENO, ''))) STARTING WITH 'AI-MF-'
+              AND ai.INVOICEDATE >= ?
+              AND ai.INVOICEDATE < ?
+              AND (ai.ISDP IS NULL OR ai.ISDP = 0)
+            ORDER BY ai.INVOICEDATE, ai.INVOICENO, det.SEQ
+        """, [date_from, date_to])
+        invoice_map = {}
+        for invoice_id, invoice_no, invoice_date, net_amount, item_description, finance_paid in cur.fetchall():
+            key = int(invoice_id or 0)
+            if key not in invoice_map:
+                invoice_map[key] = {
+                    "no_pengajuan": str(invoice_no or "").strip(),
+                    "tanggal": invoice_date,
+                    "net_amount": _to_float(net_amount),
+                    "finance_paid": int(finance_paid or 0) == 1,
+                    "marketing_names": [],
+                }
+            description = str(item_description or "").strip()
+            marker = " MF-ATAS PO :"
+            if marker in description.upper():
+                marketing_name = description[:description.upper().index(marker)].strip()
+                if marketing_name and marketing_name.upper() not in {
+                    value.upper() for value in invoice_map[key]["marketing_names"]
+                }:
+                    invoice_map[key]["marketing_names"].append(marketing_name)
+
+        # Employee bank fields are optional: some marketing names are not
+        # registered in PEGAWAI, so keep the workbook columns blank in that case.
+        name_to_bank = {}
+        marketing_names = sorted({
+            name for invoice in invoice_map.values() for name in invoice["marketing_names"]
+        })
+        for start in range(0, len(marketing_names), 400):
+            chunk = marketing_names[start:start + 400]
+            placeholders = ", ".join(["?"] * len(chunk))
+            cur.execute(f"""
+                SELECT TRIM(p.NAMA), TRIM(COALESCE(p.BANK, '')), TRIM(COALESCE(p.AC, ''))
+                FROM PEGAWAI p
+                WHERE UPPER(TRIM(p.NAMA)) IN ({placeholders})
+            """, [name.upper() for name in chunk])
+            for name, bank, account in cur.fetchall():
+                name_to_bank[str(name or "").strip().upper()] = {
+                    "bank": str(bank or "").strip(),
+                    "account": str(account or "").strip(),
+                }
+        rows = []
+        for invoice_id, invoice in invoice_map.items():
+            net_amount = max(float(invoice["net_amount"] or 0), 0)
+            gross_amount = round(net_amount / 0.97, 2) if net_amount else 0
+            tax_amount = round(gross_amount * 0.03, 2)
+            total_amount = round(gross_amount - tax_amount, 2)
+            marketing_names = invoice["marketing_names"]
+            bank_rows = [name_to_bank.get(name.upper(), {}) for name in marketing_names]
+            banks = list(dict.fromkeys(row.get("bank", "") for row in bank_rows if row.get("bank")))
+            accounts = list(dict.fromkeys(row.get("account", "") for row in bank_rows if row.get("account")))
+            invoice_date = invoice["tanggal"]
+            rows.append({
+                "row_key": invoice_id,
+                "bulan": month_names[invoice_date.month - 1] if invoice_date else "",
+                "no_pengajuan": invoice["no_pengajuan"],
+                "nama_marketing": " & ".join(marketing_names),
+                "bank": " / ".join(banks),
+                "nomor_rekening": " / ".join(accounts),
+                "dpp": gross_amount,
+                "pph21": tax_amount,
+                "total": total_amount,
+                "grand_total": int(total_amount + 0.5),
+                "status_rekap": "Lunas" if invoice["finance_paid"] else "Belum Lunas",
+            })
+
+        monthly_totals = {}
+        for row in rows:
+            item = monthly_totals.setdefault(row["bulan"], {
+                "bulan": row["bulan"], "total_pengajuan": 0, "dpp": 0.0,
+                "pph21": 0.0, "total": 0.0, "grand_total": 0,
+                "jumlah_lunas": 0, "nilai_lunas": 0.0,
+                "jumlah_belum_lunas": 0, "nilai_belum_lunas": 0.0,
+            })
+            item["total_pengajuan"] += 1
+            for key in ("dpp", "pph21", "total"):
+                item[key] += row[key]
+            item["grand_total"] += row["grand_total"]
+            paid_key = "lunas" if row["status_rekap"] == "Lunas" else "belum_lunas"
+            item[f"jumlah_{paid_key}"] += 1
+            item[f"nilai_{paid_key}"] += row["total"]
+        summary = {
+            "tahun": year,
+            "total_pengajuan": len(rows),
+            "dpp": round(sum(row["dpp"] for row in rows), 2),
+            "pph21": round(sum(row["pph21"] for row in rows), 2),
+            "total": round(sum(row["total"] for row in rows), 2),
+            "grand_total": sum(row["grand_total"] for row in rows),
+            "jumlah_lunas": sum(1 for row in rows if row["status_rekap"] == "Lunas"),
+            "nilai_lunas": round(sum(row["total"] for row in rows if row["status_rekap"] == "Lunas"), 2),
+            "jumlah_belum_lunas": sum(1 for row in rows if row["status_rekap"] != "Lunas"),
+            "nilai_belum_lunas": round(sum(row["total"] for row in rows if row["status_rekap"] != "Lunas"), 2),
+        }
+        monthly = [monthly_totals.get(name, {
+            "bulan": name, "total_pengajuan": 0, "dpp": 0.0,
+            "pph21": 0.0, "total": 0.0, "grand_total": 0,
+            "jumlah_lunas": 0, "nilai_lunas": 0.0,
+            "jumlah_belum_lunas": 0, "nilai_belum_lunas": 0.0,
+        }) for name in month_names]
+        return jsonify({"data": rows, "monthly": monthly, "summary": summary})
+    except Exception as e:
+        print(f"Error api_monitoring_mf_monthly: {e}")
+        return jsonify({"data": [], "monthly": [], "summary": {}, "error": str(e)}), 500
+    finally:
+        if "con" in locals():
+            con.close()
 
 
 @app.route("/api/dashboard-delivery-history")

@@ -37,6 +37,7 @@ const HPP = lazy(() => import('./pages/Akuntansi/HPP'))
 const ProfitLoss = lazy(() => import('./pages/Akuntansi/ProfitLoss'))
 const Aset = lazy(() => import('./pages/Akuntansi/Aset'))
 const BebanGaji = lazy(() => import('./pages/Akuntansi/BebanGaji'))
+const MonitoringMF = lazy(() => import('./pages/Akuntansi/MonitoringMF'))
 const LIWPurMkt = lazy(() => import('./pages/Kolaborasi/LIWPurMkt'))
 const DaftarProject = lazy(() => import('./pages/Project/DaftarProject'))
 const LaporanProject = lazy(() => import('./pages/Project/LaporanProject'))
@@ -119,6 +120,7 @@ function AppRoutes() {
           <Route path="akuntansi/hpp" element={<PrivateRoute module="akuntansi"><HPP /></PrivateRoute>} />
           <Route path="akuntansi/aset" element={<PrivateRoute module="akuntansi"><Aset /></PrivateRoute>} />
           <Route path="akuntansi/beban-gaji" element={<PrivateRoute module="akuntansi"><BebanGaji /></PrivateRoute>} />
+          <Route path="akuntansi/monitoring-mf" element={<PrivateRoute module="akuntansi"><MonitoringMF /></PrivateRoute>} />
           <Route path="akuntansi" element={<Navigate to="/akuntansi/profit-loss" replace />} />
 
           {/* Sub-menu Kolaborasi */}
