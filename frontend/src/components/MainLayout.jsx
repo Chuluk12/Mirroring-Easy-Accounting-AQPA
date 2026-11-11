@@ -5,6 +5,7 @@ import {
   CalculatorOutlined,
   ClockCircleOutlined,
   DashboardOutlined,
+  ContainerOutlined,
   DollarOutlined,
   FileTextOutlined,
   FullscreenExitOutlined,
@@ -291,6 +292,7 @@ export default function MainLayout() {
           { key: '/akuntansi/hpp', icon: <DollarOutlined />, label: <DevelopmentMenuLabel>HPP</DevelopmentMenuLabel>, disabled: true },
           { key: '/akuntansi/aset', icon: <CalculatorOutlined />, label: 'Aset' },
           { key: '/akuntansi/monitoring-mf', icon: <PartitionOutlined />, label: 'Monitoring MF' },
+          { key: '/akuntansi/delivery-invoice-customer', icon: <ContainerOutlined />, label: 'Delivery Invoice TO Customer' },
           { key: '/akuntansi/beban-gaji', icon: <DollarOutlined />, label: <DevelopmentMenuLabel>Beban</DevelopmentMenuLabel>, disabled: true },
         ],
       })

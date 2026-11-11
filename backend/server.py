@@ -239,6 +239,13 @@ MODULE_COLUMNS = {
         "nilai_terbayar", "terhutang", "umur_hari", "umur_label", "umur_color",
         "deskripsi",
     ],
+    "delivery_invoice_customer": [
+        "marketing", "no_do", "no_so", "no_pelanggan", "nama_pelanggan", "no_po",
+        "no_invoice", "tgl_invoice", "sub_total", "vat", "balances", "delivery",
+        "delivery_date", "syarat_pembayaran", "vat_no", "no_fp_std", "remark",
+        "pic", "telepon", "email", "paid", "paid_date", "no_form_pembayaran",
+        "tgl_cek_pembayaran",
+    ],
     "salesman": [
         "salesman_id", "nama_lengkap", "targets", "total_target",
     ],
@@ -414,6 +421,7 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "penjualan_do": ["no_pengiriman", "no_barang"],
     "waktu_pengiriman": ["arinvoice_id", "no_pengiriman"],
     "invoice": ["no_faktur"],
+    "delivery_invoice_customer": ["no_do", "no_so", "nama_pelanggan"],
     "salesman": ["salesman_id", "targets"],
     "fee_submission": ["so_no", "salesman_id", "status"],
     "monitoring_mf": ["row_key", "no_faktur", "no_barang", "status_pembayaran", "status_faktur", "status_persediaan", "validasi_harga"],
@@ -14876,7 +14884,6 @@ def _build_profit_loss_rows(cur, date_from="", date_to="", search="", marketing=
             row for row in data
             if search_lower in " ".join(str(value or "").lower() for value in row.values())
         ]
-    _enrich_profit_loss_shipment_costs(data)
     return sorted(data, key=lambda row: (row["tgl_faktur"], row["no_faktur"], row["no_barang"]), reverse=True)
 
 
@@ -14959,6 +14966,183 @@ def _profit_loss_marketing_options(cur):
         ORDER BY 1
     """)
     return [str(row[0] or "").strip() for row in cur.fetchall() if str(row[0] or "").strip()]
+
+
+@app.route("/api/delivery-invoice-customer")
+@jwt_required()
+def api_delivery_invoice_customer():
+    if not check_permission("akuntansi"):
+        return jsonify({"message": "Akses ditolak"}), 403
+
+    date_from = request.args.get("date_from", "").strip() or "2025-01-01"
+    date_to = request.args.get("date_to", "").strip() or datetime.now().date().isoformat()
+    search = request.args.get("search", "").strip()
+    marketing = request.args.get("marketing", "").strip()
+    offset = max(int(request.args.get("offset", 0)), 0)
+    limit = min(max(int(request.args.get("limit", 20)), 1), 500)
+    conditions = [
+        "ar.DELIVERYORDER = '0'",
+        "ar.INVOICETYPE = 1",
+        "(ar.ISDP IS NULL OR ar.ISDP = 0)",
+        "COALESCE(ar.GETFROMDO, 0) = 1",
+    ]
+    params = []
+    if date_from:
+        conditions.append("ar.INVOICEDATE >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("ar.INVOICEDATE < DATEADD(1 DAY TO CAST(? AS DATE))")
+        params.append(date_to)
+    if search:
+        conditions.append("""(
+            LOWER(COALESCE(ar.INVOICENO, '')) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(ar.PURCHASEORDERNO, '')) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(pd.PERSONNO, '')) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(pd.NAME, '')) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(ar.DESCRIPTION, '')) CONTAINING LOWER(?)
+            OR EXISTS (
+                SELECT 1 FROM ARINV delivery_search
+                WHERE delivery_search.CUSTOMERID = ar.CUSTOMERID
+                  AND delivery_search.PURCHASEORDERNO = ar.PURCHASEORDERNO
+                  AND delivery_search.DELIVERYORDER = '1'
+                  AND LOWER(COALESCE(delivery_search.INVOICENO, '')) CONTAINING LOWER(?)
+            )
+        )""")
+        params.extend([search] * 6)
+    if marketing:
+        conditions.append("UPPER(TRIM(COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, ''))) = UPPER(?)")
+        params.append(marketing)
+    where_sql = " AND ".join(conditions)
+    data_sql = """
+        FROM ARINV ar
+        LEFT JOIN PERSONDATA pd ON pd.ID = ar.CUSTOMERID
+        LEFT JOIN SALESMAN sm ON sm.SALESMANID = ar.SALESMANID
+        LEFT JOIN TERMOPMT term ON term.TERMID = ar.TERMSID
+        LEFT JOIN ARINV delivery ON delivery.ARINVOICEID = (
+            SELECT FIRST 1 delivery_match.ARINVOICEID
+            FROM ARINV delivery_match
+            WHERE delivery_match.CUSTOMERID = ar.CUSTOMERID
+              AND delivery_match.PURCHASEORDERNO = ar.PURCHASEORDERNO
+              AND delivery_match.DELIVERYORDER = '1'
+              AND delivery_match.INVOICETYPE = 1
+            ORDER BY delivery_match.INVOICEDATE DESC, delivery_match.ARINVOICEID DESC
+        )
+    """
+    con = None
+    try:
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        ar_columns = set(_get_table_columns(cur, "ARINV"))
+        person_columns = set(_get_table_columns(cur, "PERSONDATA"))
+        tax1_column = _match_column(ar_columns, ("TAX1AMOUNT", "TAXAMOUNT1", "TAXAMOUNT"))
+        tax2_column = _match_column(ar_columns, ("TAX2AMOUNT", "TAXAMOUNT2"))
+        tax1_expr = f"COALESCE(ar.{_identifier(tax1_column)}, 0)" if tax1_column else "0"
+        tax2_expr = f"COALESCE(ar.{_identifier(tax2_column)}, 0)" if tax2_column else "0"
+
+        def person_field_expr(candidates):
+            column = _match_column(person_columns, candidates)
+            return f"COALESCE(CAST(pd.{_identifier(column)} AS VARCHAR(255)), '')" if column else "CAST('' AS VARCHAR(255))"
+
+        vat_no_expr = "COALESCE(CAST(ar.TAXFORMNUMBER AS VARCHAR(255)), '')"
+        fp_std_expr = "COALESCE(CAST(ar.TAXFORMCODE AS VARCHAR(255)), '')"
+        pic_expr = person_field_expr(("CONTACT", "CONTACTNAME", "CONTACTPERSON"))
+        phone_expr = person_field_expr(("PHONE1", "PHONE", "TELEPHONE", "PHONE2"))
+        email_expr = "COALESCE(NULLIF(TRIM(pd.EMAIL), ''), NULLIF(TRIM(sm.EMAIL), ''), '')"
+        cur.execute(f"""
+            SELECT COUNT(*)
+            FROM ARINV ar
+            LEFT JOIN PERSONDATA pd ON pd.ID = ar.CUSTOMERID
+            LEFT JOIN SALESMAN sm ON sm.SALESMANID = ar.SALESMANID
+            WHERE {where_sql}
+        """, params)
+        total = int((cur.fetchone() or [0])[0] or 0)
+        cur.execute(f"""
+            SELECT FIRST ? SKIP ?
+                COALESCE(NULLIF(TRIM(sm.FIRSTNAME || ' ' || sm.LASTNAME), ''), 'Tanpa Marketing'),
+                ar.INVOICENO,
+                pd.PERSONNO,
+                pd.NAME,
+                ar.PURCHASEORDERNO,
+                ar.INVOICENO,
+                ar.INVOICEDATE,
+                COALESCE(ar.INVOICEAMOUNT, 0) - {tax1_expr} - {tax2_expr},
+                {tax1_expr} + {tax2_expr},
+                COALESCE(ar.INVOICEAMOUNT, 0),
+                COALESCE(NULLIF(TRIM(delivery.DESCRIPTION), ''), ar.DESCRIPTION),
+                delivery.INVOICEDATE,
+                COALESCE(term.TERMNAME, CAST(term.NETDAYS AS VARCHAR(20))),
+                COALESCE(ar.OWING, 0),
+                COALESCE(ar.PAIDAMOUNT, 0),
+                CASE WHEN COALESCE(ar.OWING, 0) <= 0 THEN COALESCE(ar.PAIDAMOUNT, ar.INVOICEAMOUNT, 0) ELSE 0 END,
+                (SELECT FIRST 1 pay.PAYMENTDATE
+                 FROM ARINVPMT invoice_payment
+                 JOIN ARPMT pay ON pay.PAYMENTID = invoice_payment.PAYMENTID
+                 WHERE invoice_payment.ARINVOICEID = ar.ARINVOICEID
+                 ORDER BY pay.PAYMENTDATE DESC, pay.PAYMENTID DESC),
+                {vat_no_expr},
+                {fp_std_expr},
+                COALESCE(ar.DESCRIPTION, ''),
+                {pic_expr},
+                {phone_expr},
+                {email_expr},
+                COALESCE((
+                    SELECT FIRST 1 COALESCE(NULLIF(TRIM(pay.CHEQUENO), ''), NULLIF(TRIM(pay.CHEQNO), ''))
+                    FROM ARINVPMT invoice_payment
+                    JOIN ARPMT pay ON pay.PAYMENTID = invoice_payment.PAYMENTID
+                    WHERE invoice_payment.ARINVOICEID = ar.ARINVOICEID
+                    ORDER BY pay.PAYMENTDATE DESC, pay.PAYMENTID DESC
+                ), ''),
+                (SELECT FIRST 1 pay.CHEQUEDATE
+                 FROM ARINVPMT invoice_payment
+                 JOIN ARPMT pay ON pay.PAYMENTID = invoice_payment.PAYMENTID
+                 WHERE invoice_payment.ARINVOICEID = ar.ARINVOICEID
+                 ORDER BY pay.PAYMENTDATE DESC, pay.PAYMENTID DESC),
+                CAST('' AS VARCHAR(255)),
+                CAST('' AS VARCHAR(255)),
+                COALESCE((SELECT FIRST 1 so1.SONO FROM ARINVDET so_det JOIN SO so1 ON so1.SOID = so_det.SOID WHERE so_det.ARINVOICEID = delivery.ARINVOICEID ORDER BY so1.SODATE DESC), ''),
+                COALESCE(delivery.INVOICENO, '')
+            {data_sql}
+            WHERE {where_sql}
+            ORDER BY ar.INVOICEDATE DESC, ar.INVOICENO
+        """, [limit, offset] + params)
+        rows = cur.fetchall()
+        cur.execute("""
+            SELECT DISTINCT COALESCE(NULLIF(TRIM(sm.FIRSTNAME || ' ' || sm.LASTNAME), ''), 'Tanpa Marketing')
+            FROM ARINV ar
+            LEFT JOIN SALESMAN sm ON sm.SALESMANID = ar.SALESMANID
+            WHERE ar.DELIVERYORDER = '0'
+              AND ar.INVOICETYPE = 1
+              AND (ar.ISDP IS NULL OR ar.ISDP = 0)
+              AND COALESCE(ar.GETFROMDO, 0) = 1
+            ORDER BY 1
+        """)
+        marketing_options = [str(row[0] or '').strip() for row in cur.fetchall() if str(row[0] or '').strip()]
+        data = []
+        for row in rows:
+            owing = _to_float(row[13])
+            row_data = {
+                "marketing": str(row[0] or '').strip(), "no_do": str(row[28] or '').strip(),
+                "no_so": str(row[27] or '').strip(),
+                "no_pelanggan": str(row[2] or '').strip(), "nama_pelanggan": str(row[3] or '').strip(),
+                "no_po": str(row[4] or '').strip(), "no_invoice": str(row[5] or '').strip(),
+                "tgl_invoice": str(row[6]) if row[6] else "", "sub_total": _to_float(row[7]),
+                "vat": _to_float(row[8]), "balances": _to_float(row[9]), "delivery": str(row[10] or '').strip(),
+                "delivery_date": str(row[11]) if row[11] else "", "syarat_pembayaran": str(row[12] or '').strip(),
+                "paid": _to_float(row[15]) if owing <= 0 else _to_float(row[14]),
+                "paid_date": str(row[16]) if row[16] else "", "vat_no": str(row[17] or '').strip(),
+                "no_fp_std": str(row[18] or '').strip(), "remark": str(row[19] or '').strip(),
+                "pic": str(row[20] or '').strip(), "telepon": str(row[21] or '').strip(),
+                "email": str(row[22] or '').strip(), "no_form_pembayaran": str(row[23] or '').strip(),
+                "tgl_cek_pembayaran": str(row[24]) if row[24] else "",
+            }
+            data.append(row_data)
+        return jsonify({"data": data, "total": total, "marketing_options": marketing_options})
+    except Exception as e:
+        print(f"Error api_delivery_invoice_customer: {e}")
+        return jsonify({"data": [], "total": 0, "error": str(e)}), 500
+    finally:
+        if con:
+            con.close()
 
 
 @app.route("/api/profit-loss")

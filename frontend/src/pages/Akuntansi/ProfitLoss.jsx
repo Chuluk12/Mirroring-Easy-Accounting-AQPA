@@ -16,7 +16,7 @@ import { filterColumnsByPermission, filterExportColumnsByPermission } from '../.
 const { RangePicker } = DatePicker
 const { Search } = Input
 const { Text, Title } = Typography
-const DEFAULT_PAGE_SIZE = 50
+const DEFAULT_PAGE_SIZE = 20
 const PROFIT_LOSS_TIMEOUT = 600000
 const EXPORT_POLL_INTERVAL = 2000
 const EXPORT_POLL_TIMEOUT = 30 * 60 * 1000
@@ -389,6 +389,7 @@ export default function ProfitLoss() {
   const searchRef = useRef('')
   const marketingRef = useRef('')
   const dateRangeRef = useRef(defaultProfitLossRange())
+  const initialFetchStartedRef = useRef(false)
 
   const fetchData = useCallback(async (page = 1, pageSize = DEFAULT_PAGE_SIZE, searchValue = '', dates = defaultProfitLossRange(), marketingValue = '') => {
     setLoading(true)
@@ -421,6 +422,8 @@ export default function ProfitLoss() {
 
   useEffect(() => {
     // Initial remote data synchronization.
+    if (initialFetchStartedRef.current) return
+    initialFetchStartedRef.current = true
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchData(1, DEFAULT_PAGE_SIZE, '', dateRangeRef.current, '')
   }, [fetchData])
